@@ -1,0 +1,10 @@
+# Kompilacja i pliki tymczasowe ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# Konfiguracja lokalna VS Code
+.vscode/
+*.log
