@@ -38,6 +38,9 @@ uint8_t wifi_mgr_get_default_apts_mode(void);
 // Czy domyslnie ukrywac ruch naziemny (samoloty on_ground) z NVS.
 bool wifi_mgr_get_hide_ground(void);
 
+// Czy domyslnie wyswietlac warstwe mapy w tle radaru (MAP) z NVS.
+bool wifi_mgr_get_map_enabled(void);
+
 // Dlugosc sladu lotu (liczba punktow historii trasy rysowanych za
 // samolotem) z NVS. 0 = slad wylaczony. Dozwolone wartosci: 0/15/30/60/120.
 uint8_t wifi_mgr_get_trail_len(void);

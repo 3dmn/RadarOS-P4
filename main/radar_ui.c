@@ -16,6 +16,7 @@
 #include "wifi_manager.h"
 #include "radar_ui.h"
 #include "photo_service.h"
+#include "map_tile_service.h"
 #include "i18n.h"
 
 // Grafiki wektorowe samolotow - generowane pliki LVGL, kompilowane jako
@@ -59,6 +60,7 @@ typedef struct {
     bool     calc_visible;
     bool     calc_vec_visible;
     bool     calc_is_military;
+    bool     calc_is_lpr;
     int      calc_vec_pt_count;
     lv_point_precise_t vec_pts_calc[MAX_TRACK_POINTS + 2];
     lv_color_t calc_color;
@@ -94,6 +96,8 @@ static lv_obj_t *btn_airport_toggle;
 static lv_obj_t *lbl_airport_toggle;
 static lv_obj_t *btn_gnd_toggle;
 static lv_obj_t *lbl_gnd_toggle;
+static lv_obj_t *btn_map_toggle;
+static lv_obj_t *lbl_map_toggle;
 
 static lv_obj_t *hud_trail_segs[MAX_HUD_SEGS];
 static lv_point_precise_t hud_seg_pts[MAX_HUD_SEGS][2];
@@ -160,6 +164,13 @@ static inline void lv_obj_set_hidden(lv_obj_t *obj, bool hidden) {
     if (!obj) return;
     if (hidden) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Kontrastowy niebieski dla helikopterow LPR (Lotnicze Pogotowie Ratunkowe)
+#define COLOR_LPR lv_color_hex(0x0096FF)
+
+static bool is_lpr_callsign(const char *callsign) {
+    return strncmp(callsign, "LPR", 3) == 0 || strncmp(callsign, "RAT", 3) == 0;
 }
 
 static lv_color_t get_fr24_altitude_color(int alt_ft) {
@@ -236,8 +247,10 @@ void radar_ui_refresh(void) {
             ui_slots[i].calc_half_h = (int)dsc->header.h / 2;
             ui_slots[i].calc_heading_x10 = live_fleet[i].heading_deg * 10;
             ui_slots[i].calc_is_military = live_fleet[i].is_military;
+            ui_slots[i].calc_is_lpr = is_lpr_callsign(live_fleet[i].callsign);
             ui_slots[i].calc_color = live_fleet[i].is_military ? lv_color_hex(0xFF3333)
-                                                                 : get_fr24_altitude_color(live_fleet[i].altitude_ft);
+                                    : ui_slots[i].calc_is_lpr    ? COLOR_LPR
+                                                                  : get_fr24_altitude_color(live_fleet[i].altitude_ft);
 
             snprintf(ui_slots[i].calc_id, sizeof(ui_slots[i].calc_id), "%s",
                      live_fleet[i].callsign[0] ? live_fleet[i].callsign : live_fleet[i].hex);
@@ -385,8 +398,10 @@ void radar_ui_refresh(void) {
 
         lv_image_set_src(ui_slots[i].radar_icon, ui_slots[i].calc_dsc);
         lv_image_set_pivot(ui_slots[i].radar_icon, ui_slots[i].calc_half_w, ui_slots[i].calc_half_h);
-        lv_obj_set_style_image_recolor(ui_slots[i].radar_icon, lv_color_hex(0xFF3333), 0);
-        lv_obj_set_style_image_recolor_opa(ui_slots[i].radar_icon, ui_slots[i].calc_is_military ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_image_recolor(ui_slots[i].radar_icon,
+            ui_slots[i].calc_is_military ? lv_color_hex(0xFF3333) : COLOR_LPR, 0);
+        lv_obj_set_style_image_recolor_opa(ui_slots[i].radar_icon,
+            (ui_slots[i].calc_is_military || ui_slots[i].calc_is_lpr) ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         lv_obj_set_pos(ui_slots[i].radar_icon, ui_slots[i].calc_px - ui_slots[i].calc_half_w, ui_slots[i].calc_py - ui_slots[i].calc_half_h);
         lv_obj_set_pos(ui_slots[i].radar_label, ui_slots[i].calc_px + ui_slots[i].calc_half_w + 6, ui_slots[i].calc_py - ui_slots[i].calc_half_h);
         lv_image_set_rotation(ui_slots[i].radar_icon, ui_slots[i].calc_heading_x10);
@@ -400,8 +415,10 @@ void radar_ui_refresh(void) {
         lv_image_set_src(ui_slots[i].list_icon, ui_slots[i].calc_dsc);
         lv_image_set_pivot(ui_slots[i].list_icon, ui_slots[i].calc_half_w, ui_slots[i].calc_half_h);
         lv_image_set_rotation(ui_slots[i].list_icon, ui_slots[i].calc_heading_x10);
-        lv_obj_set_style_image_recolor(ui_slots[i].list_icon, lv_color_hex(0xFF3333), 0);
-        lv_obj_set_style_image_recolor_opa(ui_slots[i].list_icon, ui_slots[i].calc_is_military ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_image_recolor(ui_slots[i].list_icon,
+            ui_slots[i].calc_is_military ? lv_color_hex(0xFF3333) : COLOR_LPR, 0);
+        lv_obj_set_style_image_recolor_opa(ui_slots[i].list_icon,
+            (ui_slots[i].calc_is_military || ui_slots[i].calc_is_lpr) ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
 
         if (ui_slots[i].calc_is_military) {
             lv_label_set_text_fmt(ui_slots[i].list_lbl_cs, "%s [MIL]", ui_slots[i].calc_id);
@@ -476,6 +493,7 @@ static void switch_range(void) {
     lv_label_set_text_fmt(lbl_range_pill, "<> %.0f km", current_range);
     bsp_display_unlock();
 
+    map_tile_service_request_reload(g_radar_lat, g_radar_lon, current_range);
     radar_ui_refresh();
 }
 
@@ -547,6 +565,28 @@ static void gnd_toggle_click_event_cb(lv_event_t *e) {
     bsp_display_unlock();
 
     radar_ui_refresh();
+}
+
+static void apply_map_toggle_style(void) {
+    bool map_on = map_tile_service_is_enabled();
+    if (map_on) {
+        lv_obj_set_style_bg_color(btn_map_toggle, lv_color_hex(0x002b11), 0);
+        lv_obj_set_style_border_color(btn_map_toggle, lv_color_hex(0x005522), 0);
+        lv_obj_set_style_text_color(lbl_map_toggle, lv_color_hex(0x00ff88), 0);
+        lv_label_set_text(lbl_map_toggle, "MAP: ON");
+    } else {
+        lv_obj_set_style_bg_color(btn_map_toggle, lv_color_hex(0x550000), 0);
+        lv_obj_set_style_border_color(btn_map_toggle, lv_color_hex(0xff5555), 0);
+        lv_obj_set_style_text_color(lbl_map_toggle, lv_color_hex(0xff5555), 0);
+        lv_label_set_text(lbl_map_toggle, "MAP: OFF");
+    }
+}
+
+static void map_toggle_click_event_cb(lv_event_t *e) {
+    map_tile_service_set_enabled(!map_tile_service_is_enabled());
+    bsp_display_lock(0);
+    apply_map_toggle_style();
+    bsp_display_unlock();
 }
 
 static void select_aircraft_by_index(int idx) {
@@ -684,6 +724,7 @@ bool radar_ui_init(void) {
     show_airports = (wifi_mgr_get_default_apts_mode() == 1);
     hide_ground_traffic = wifi_mgr_get_hide_ground();
     i18n_set_lang(wifi_mgr_get_lang());
+    map_tile_service_set_enabled(wifi_mgr_get_map_enabled());
 
     return true;
 }
@@ -704,6 +745,8 @@ void radar_ui_build(void) {
     lv_obj_clear_flag(radar_area, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(radar_area, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(radar_area, popup_close_event_cb, LV_EVENT_CLICKED, NULL);
+
+    map_tile_service_set_canvas_parent(radar_area);
 
     lv_obj_t *grid_h = lv_line_create(radar_area);
     static lv_point_precise_t pt_h[2] = {{0, 290}, {580, 290}};
@@ -805,19 +848,22 @@ void radar_ui_build(void) {
     lv_obj_set_style_bg_opa(top_bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(top_bar, 0, 0);
     lv_obj_set_style_pad_all(top_bar, 0, 0);
-    lv_obj_set_style_pad_column(top_bar, 6, 0);
+    lv_obj_set_style_pad_column(top_bar, 3, 0);
+    lv_obj_set_style_pad_left(top_bar, 2, 0);
+    lv_obj_set_style_pad_right(top_bar, 2, 0);
     lv_obj_clear_flag(top_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(top_bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top_bar, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     btn_airport_toggle = lv_obj_create(top_bar);
-    lv_obj_set_size(btn_airport_toggle, 0, 26);
+    lv_obj_set_size(btn_airport_toggle, LV_SIZE_CONTENT, 26);
     lv_obj_set_flex_grow(btn_airport_toggle, 1);
     lv_obj_set_style_bg_color(btn_airport_toggle, lv_color_hex(0x002b11), 0);
     lv_obj_set_style_border_color(btn_airport_toggle, lv_color_hex(0x005522), 0);
     lv_obj_set_style_border_width(btn_airport_toggle, 1, 0);
     lv_obj_set_style_radius(btn_airport_toggle, 6, 0);
-    lv_obj_set_style_pad_all(btn_airport_toggle, 0, 0);
+    lv_obj_set_style_pad_hor(btn_airport_toggle, 4, 0);
+    lv_obj_set_style_pad_ver(btn_airport_toggle, 0, 0);
     lv_obj_add_flag(btn_airport_toggle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_airport_toggle, airport_toggle_click_event_cb, LV_EVENT_CLICKED, NULL);
 
@@ -831,13 +877,14 @@ void radar_ui_build(void) {
     }
 
     btn_filter_ground = lv_obj_create(top_bar);
-    lv_obj_set_size(btn_filter_ground, 0, 26);
+    lv_obj_set_size(btn_filter_ground, LV_SIZE_CONTENT, 26);
     lv_obj_set_flex_grow(btn_filter_ground, 1);
     lv_obj_set_style_bg_color(btn_filter_ground, lv_color_hex(0x002b11), 0);
     lv_obj_set_style_border_color(btn_filter_ground, lv_color_hex(0x005522), 0);
     lv_obj_set_style_border_width(btn_filter_ground, 1, 0);
     lv_obj_set_style_radius(btn_filter_ground, 6, 0);
-    lv_obj_set_style_pad_all(btn_filter_ground, 0, 0);
+    lv_obj_set_style_pad_hor(btn_filter_ground, 4, 0);
+    lv_obj_set_style_pad_ver(btn_filter_ground, 0, 0);
     lv_obj_add_flag(btn_filter_ground, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_filter_ground, filter_click_event_cb, LV_EVENT_CLICKED, NULL);
 
@@ -846,11 +893,12 @@ void radar_ui_build(void) {
     apply_air_filter_style();
 
     btn_gnd_toggle = lv_obj_create(top_bar);
-    lv_obj_set_size(btn_gnd_toggle, 0, 26);
+    lv_obj_set_size(btn_gnd_toggle, LV_SIZE_CONTENT, 26);
     lv_obj_set_flex_grow(btn_gnd_toggle, 1);
     lv_obj_set_style_border_width(btn_gnd_toggle, 1, 0);
     lv_obj_set_style_radius(btn_gnd_toggle, 6, 0);
-    lv_obj_set_style_pad_all(btn_gnd_toggle, 0, 0);
+    lv_obj_set_style_pad_hor(btn_gnd_toggle, 4, 0);
+    lv_obj_set_style_pad_ver(btn_gnd_toggle, 0, 0);
     lv_obj_add_flag(btn_gnd_toggle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_gnd_toggle, gnd_toggle_click_event_cb, LV_EVENT_CLICKED, NULL);
 
@@ -858,15 +906,30 @@ void radar_ui_build(void) {
     lv_obj_center(lbl_gnd_toggle);
     apply_gnd_filter_style();
 
+    btn_map_toggle = lv_obj_create(top_bar);
+    lv_obj_set_size(btn_map_toggle, LV_SIZE_CONTENT, 26);
+    lv_obj_set_flex_grow(btn_map_toggle, 1);
+    lv_obj_set_style_border_width(btn_map_toggle, 1, 0);
+    lv_obj_set_style_radius(btn_map_toggle, 6, 0);
+    lv_obj_set_style_pad_hor(btn_map_toggle, 4, 0);
+    lv_obj_set_style_pad_ver(btn_map_toggle, 0, 0);
+    lv_obj_add_flag(btn_map_toggle, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(btn_map_toggle, map_toggle_click_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lbl_map_toggle = lv_label_create(btn_map_toggle);
+    lv_obj_center(lbl_map_toggle);
+    apply_map_toggle_style();
+
     lv_obj_t *btn_range = lv_obj_create(top_bar);
-    lv_obj_set_size(btn_range, 0, 26);
+    lv_obj_set_size(btn_range, LV_SIZE_CONTENT, 26);
     lv_obj_set_flex_grow(btn_range, 1);
     lv_obj_clear_flag(btn_range, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(btn_range, lv_color_hex(0x002b11), 0);
     lv_obj_set_style_border_color(btn_range, lv_color_hex(0x00ff88), 0);
     lv_obj_set_style_border_width(btn_range, 1, 0);
     lv_obj_set_style_radius(btn_range, 6, 0);
-    lv_obj_set_style_pad_all(btn_range, 0, 0);
+    lv_obj_set_style_pad_hor(btn_range, 4, 0);
+    lv_obj_set_style_pad_ver(btn_range, 0, 0);
     lv_obj_add_flag(btn_range, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_range, range_click_event_cb, LV_EVENT_CLICKED, NULL);
 
@@ -1018,4 +1081,6 @@ void radar_ui_build(void) {
     lv_obj_align(popup_lbl_route, LV_ALIGN_BOTTOM_LEFT, 5, -2);
 
     bsp_display_unlock();
+
+    map_tile_service_request_reload(g_radar_lat, g_radar_lon, range_steps[current_range_idx]);
 }

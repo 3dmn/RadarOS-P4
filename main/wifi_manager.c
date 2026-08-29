@@ -33,6 +33,7 @@
 #define AIR_MODE_DEFAULT        0
 #define APTS_MODE_DEFAULT       1
 #define HIDE_GROUND_DEFAULT     1
+#define MAP_ENABLED_DEFAULT     1
 #define LANG_DEFAULT            0
 #define TRAIL_LEN_DEFAULT       30
 #define MAX_AIRCRAFT_DEFAULT    64
@@ -62,6 +63,7 @@ static uint16_t g_default_range = DEFAULT_RANGE_DEFAULT;
 static uint8_t g_air_mode = AIR_MODE_DEFAULT;
 static uint8_t g_apts_mode = APTS_MODE_DEFAULT;
 static uint8_t g_hide_ground = HIDE_GROUND_DEFAULT;
+static uint8_t g_map_enabled = MAP_ENABLED_DEFAULT;
 static uint8_t g_lang = LANG_DEFAULT;
 static uint8_t g_trail_len = TRAIL_LEN_DEFAULT;
 static uint16_t g_max_aircraft = MAX_AIRCRAFT_DEFAULT;
@@ -121,6 +123,10 @@ static void load_settings_from_nvs(void) {
     if (g_hide_ground > 1) {
         g_hide_ground = HIDE_GROUND_DEFAULT;
     }
+    nvs_get_u8(my_handle, "map_en", &g_map_enabled);
+    if (g_map_enabled > 1) {
+        g_map_enabled = MAP_ENABLED_DEFAULT;
+    }
     nvs_get_u8(my_handle, "lang", &g_lang);
     if (g_lang > 1) {
         g_lang = LANG_DEFAULT;
@@ -153,6 +159,7 @@ static void save_settings_to_nvs(void) {
     nvs_set_u8(my_handle, "air_mode", g_air_mode);
     nvs_set_u8(my_handle, "apts_mode", g_apts_mode);
     nvs_set_u8(my_handle, "hide_ground", g_hide_ground);
+    nvs_set_u8(my_handle, "map_en", g_map_enabled);
     nvs_set_u8(my_handle, "lang", g_lang);
     nvs_set_u8(my_handle, "trail_len", g_trail_len);
     nvs_set_u16(my_handle, "max_aircraft", g_max_aircraft);
@@ -178,6 +185,10 @@ uint8_t wifi_mgr_get_default_apts_mode(void) {
 
 bool wifi_mgr_get_hide_ground(void) {
     return g_hide_ground == 1;
+}
+
+bool wifi_mgr_get_map_enabled(void) {
+    return g_map_enabled == 1;
 }
 
 app_lang_t wifi_mgr_get_lang(void) {
@@ -402,6 +413,14 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         g_hide_ground == 0 ? "selected" : "", T(STR_WEB_GND_SHOW));
 
     hb_append(&hb,
+        "<div><label>%s</label><select name='map_en'>"
+        "<option value='1' %s>%s</option><option value='0' %s>%s</option>"
+        "</select></div>",
+        T(STR_WEB_MAP),
+        g_map_enabled == 1 ? "selected" : "", T(STR_WEB_MAP_ON),
+        g_map_enabled == 0 ? "selected" : "", T(STR_WEB_MAP_OFF));
+
+    hb_append(&hb,
         "<div><label>%s</label><select name='apts'>"
         "<option value='1' %s>%s</option><option value='0' %s>%s</option>"
         "</select></div>",
@@ -587,6 +606,10 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     if (httpd_query_key_value(buf, "hide_ground", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
         g_hide_ground = (atoi(param) == 1) ? 1 : 0;
+    }
+    if (httpd_query_key_value(buf, "map_en", param, sizeof(param)) == ESP_OK) {
+        url_decode(param);
+        g_map_enabled = (atoi(param) == 1) ? 1 : 0;
     }
     if (httpd_query_key_value(buf, "lang", param, sizeof(param)) == ESP_OK) {
         url_decode(param);

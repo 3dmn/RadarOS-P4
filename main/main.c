@@ -5,11 +5,13 @@
 #include "adsb_service.h"
 #include "radar_ui.h"
 #include "photo_service.h"
+#include "map_tile_service.h"
 
 void app_main(void) {
     wifi_manager_init();
 
     if (!adsb_service_init()) return;
+    if (!map_tile_service_init()) return;
     if (!radar_ui_init()) return;
 
     lv_display_t *disp = bsp_display_start();
