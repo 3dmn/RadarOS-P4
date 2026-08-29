@@ -5,12 +5,21 @@ sdkconfig.old
 managed_components/
 dependencies.lock
 
-# Konfiguracja lokalna VS Code / JetBrains
+# Konfiguracja lokalna VS Code / JetBrains / Clangd
 .vscode/
 .idea/
+.clangd/
 *.log
+
+# Asystenci AI
+CLAUDE.md
+.claude/
 
 # Artefakty kompilacji
 *.bin
 *.map
 *.elf
+
+# Pliki systemowe
+Thumbs.db
+.DS_Store
