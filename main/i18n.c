@@ -1,0 +1,125 @@
+#include "i18n.h"
+
+static app_lang_t s_lang = LANG_EN;
+
+static const char *s_strings[LANG_COUNT][STR_COUNT] = {
+    [LANG_EN] = {
+        [STR_FETCHING_PHOTO]    = "FETCHING PHOTO...",
+        [STR_NO_PHOTO_DB]       = "NO PHOTO IN DATABASE",
+        [STR_NO_PHOTO]          = "NO PHOTO",
+        [STR_CONNECTING_WIFI]   = "CONNECTING WI-FI...",
+        [STR_UPDATING_ADSB]     = "UPDATING ADS-B...",
+        [STR_NO_TRAFFIC]        = "NO TRAFFIC DETECTED",
+        // Naglowek ruchu celowo identyczny w obu jezykach - standard lotniczy
+        // (TRAFFIC/ALT/SPD/HDG/RNG/AIR/APTS/GND...) zostaje po angielsku w
+        // calym HUD-zie radaru niezaleznie od jezyka UI.
+        [STR_TRAFFIC_FMT]       = "TRAFFIC: %d PLANES IN %dKM",
+        [STR_WEB_LANGUAGE]      = "Language",
+        [STR_WEB_STATION_NAME]  = "Station Name",
+        [STR_WEB_LATITUDE]      = "Latitude",
+        [STR_WEB_LONGITUDE]     = "Longitude",
+        [STR_WEB_SELECT_ON_MAP] = "Select on map",
+        [STR_WEB_BRIGHTNESS]    = "Screen Brightness",
+        [STR_WEB_DEFAULT_RANGE] = "Default Range",
+        [STR_WEB_AIR_FILTER]    = "Default Traffic Filter",
+        [STR_WEB_APTS]          = "Default Airports (APTS)",
+        [STR_WEB_GND]           = "Ground Traffic (GND)",
+        [STR_WEB_AIR_ALL]       = "ALL (All aircraft)",
+        [STR_WEB_AIR_CIVIL]     = "CIVIL (Civil / Commercial only)",
+        [STR_WEB_AIR_MIL]       = "MIL (Military only)",
+        [STR_WEB_APTS_ON]       = "ON (Enabled)",
+        [STR_WEB_APTS_OFF]      = "OFF (Disabled)",
+        [STR_WEB_GND_HIDE]      = "Hide ground traffic (Airborne only)",
+        [STR_WEB_GND_SHOW]      = "Show all (Airborne + Ground)",
+        [STR_WEB_TRAIL_LEN]     = "Flight Trail Length (Track History)",
+        [STR_WEB_TRAIL_0]       = "Disabled (No trail)",
+        [STR_WEB_TRAIL_15]      = "Short (~15 points)",
+        [STR_WEB_TRAIL_30]      = "Medium (~30 points - Default)",
+        [STR_WEB_TRAIL_60]      = "Long (~60 points)",
+        [STR_WEB_TRAIL_120]     = "Maximum (~120 points)",
+        [STR_WEB_MAX_AIRCRAFT]      = "Max Aircraft on Radar (10 - 200)",
+        [STR_WEB_MAX_AIRCRAFT_HELP] = "Enter value between 10 and 200 (hard hardware limit is 200)",
+        [STR_WEB_CARD_LANG]         = "Language & Identification",
+        [STR_WEB_CARD_LOCATION]     = "Radar Location",
+        [STR_WEB_CARD_DISPLAY]      = "Radar & Display",
+        [STR_WEB_SAVE_REBOOT]   = "SAVE AND REBOOT",
+        [STR_WEB_PAGE_TITLE]        = "Radar ADSB Config",
+        [STR_WEB_WIFI_SECTION]      = "Wi-Fi Settings",
+        [STR_WEB_SSID]              = "Wi-Fi Network (SSID)",
+        [STR_WEB_PASSWORD]          = "Wi-Fi Password",
+        [STR_WEB_PASS_PLACEHOLDER]  = "(leave blank to keep unchanged)",
+        [STR_WEB_SCAN_NETWORKS]     = "Scan Networks",
+        [STR_WEB_SCANNING]          = "\xE2\x8F\xB3 Scanning...",
+        [STR_WEB_SCAN_FOUND_PREFIX] = "\xE2\x9C\x85 Found ",
+        [STR_WEB_SCAN_FOUND_SUFFIX] = " networks",
+        [STR_WEB_SCAN_NONE]         = "\xE2\x9A\xA0\xEF\xB8\x8F No networks found",
+        [STR_WEB_SAVING_MSG]        = "Saving configuration and restarting device...",
+        [STR_WEB_REBOOTING_MSG]     = "Device is rebooting. Please wait ~5 seconds...",
+        [STR_WEB_SAVE_ERROR]        = "Save failed.",
+    },
+    [LANG_PL] = {
+        [STR_FETCHING_PHOTO]    = "POBIERANIE ZDJECIA...",
+        [STR_NO_PHOTO_DB]       = "BRAK ZDJECIA W BAZIE",
+        [STR_NO_PHOTO]          = "BRAK ZDJECIA",
+        [STR_CONNECTING_WIFI]   = "LACZENIE Z WI-FI...",
+        [STR_UPDATING_ADSB]     = "AKTUALIZACJA ADS-B...",
+        [STR_NO_TRAFFIC]        = "BRAK STATKOW W ZASIEGU",
+        [STR_TRAFFIC_FMT]       = "TRAFFIC: %d PLANES IN %dKM",
+        [STR_WEB_LANGUAGE]      = "Jezyk",
+        [STR_WEB_STATION_NAME]  = "Nazwa stacji",
+        [STR_WEB_LATITUDE]      = "Szerokosc geogr. (Lat)",
+        [STR_WEB_LONGITUDE]     = "Dlugosc geogr. (Lon)",
+        [STR_WEB_SELECT_ON_MAP] = "Wybierz na mapie",
+        [STR_WEB_BRIGHTNESS]    = "Jasnosc ekranu",
+        [STR_WEB_DEFAULT_RANGE] = "Domyslny zasieg startowy",
+        [STR_WEB_AIR_FILTER]    = "Domyslny filtr ruchu (AIR)",
+        [STR_WEB_APTS]          = "Domyslny stan lotnisk (APTS)",
+        [STR_WEB_GND]           = "Ruch naziemny (GND)",
+        [STR_WEB_AIR_ALL]       = "ALL (Wszystkie statki)",
+        [STR_WEB_AIR_CIVIL]     = "CIVIL (Tylko cywilne / pasazerskie)",
+        [STR_WEB_AIR_MIL]       = "MIL (Tylko wojskowe)",
+        [STR_WEB_APTS_ON]       = "ON (Wlaczone)",
+        [STR_WEB_APTS_OFF]      = "OFF (Wylaczone)",
+        [STR_WEB_GND_HIDE]      = "Ukrywaj samoloty na ziemi (Tylko w locie)",
+        [STR_WEB_GND_SHOW]      = "Pokazuj wszystkie (W locie + na ziemi)",
+        [STR_WEB_TRAIL_LEN]     = "Dlugosc sladu lotu (Historia trasy)",
+        [STR_WEB_TRAIL_0]       = "Wylaczony (Brak sladu)",
+        [STR_WEB_TRAIL_15]      = "Krotki (~15 punktow)",
+        [STR_WEB_TRAIL_30]      = "Sredni (~30 punktow - Domyslny)",
+        [STR_WEB_TRAIL_60]      = "Dlugi (~60 punktow)",
+        [STR_WEB_TRAIL_120]     = "Maksymalny (~120 punktow)",
+        [STR_WEB_MAX_AIRCRAFT]      = "Maksymalna liczba samolotow (10 - 200)",
+        [STR_WEB_MAX_AIRCRAFT_HELP] = "Wpisz wartosc od 10 do 200 (limit sprzetowy wynosi 200)",
+        [STR_WEB_CARD_LANG]         = "Jezyk i identyfikacja",
+        [STR_WEB_CARD_LOCATION]     = "Lokalizacja radaru",
+        [STR_WEB_CARD_DISPLAY]      = "Parametry wyswietlacza i radaru",
+        [STR_WEB_SAVE_REBOOT]   = "ZAPISZ I URUCHOM PONOWNIE",
+        [STR_WEB_PAGE_TITLE]        = "Konfiguracja Radaru ADSB",
+        [STR_WEB_WIFI_SECTION]      = "Ustawienia Wi-Fi",
+        [STR_WEB_SSID]              = "Nazwa sieci (SSID)",
+        [STR_WEB_PASSWORD]          = "Haslo Wi-Fi",
+        [STR_WEB_PASS_PLACEHOLDER]  = "(bez zmian jesli puste)",
+        [STR_WEB_SCAN_NETWORKS]     = "Skanuj sieci",
+        [STR_WEB_SCANNING]          = "\xE2\x8F\xB3 Skanowanie...",
+        [STR_WEB_SCAN_FOUND_PREFIX] = "\xE2\x9C\x85 Znaleziono ",
+        [STR_WEB_SCAN_FOUND_SUFFIX] = " sieci",
+        [STR_WEB_SCAN_NONE]         = "\xE2\x9A\xA0\xEF\xB8\x8F Brak sieci",
+        [STR_WEB_SAVING_MSG]        = "Zapisywanie konfiguracji i ponowne uruchamianie...",
+        [STR_WEB_REBOOTING_MSG]     = "Urzadzenie uruchamia sie ponownie. Poczekaj ok. 5 sekund...",
+        [STR_WEB_SAVE_ERROR]        = "Blad zapisu.",
+    },
+};
+
+void i18n_set_lang(app_lang_t lang) {
+    s_lang = (lang == LANG_PL) ? LANG_PL : LANG_EN;
+}
+
+app_lang_t i18n_get_lang(void) {
+    return s_lang;
+}
+
+const char *T(i18n_str_id_t id) {
+    if (id < 0 || id >= STR_COUNT) return "";
+    const char *s = s_strings[s_lang][id];
+    return s ? s : "";
+}
