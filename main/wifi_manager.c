@@ -34,6 +34,7 @@
 #define APTS_MODE_DEFAULT       1
 #define HIDE_GROUND_DEFAULT     1
 #define MAP_ENABLED_DEFAULT     1
+#define SQUAWK_ALERT_DEFAULT    1
 #define LANG_DEFAULT            0
 #define TRAIL_LEN_DEFAULT       30
 #define MAX_AIRCRAFT_DEFAULT    64
@@ -64,6 +65,7 @@ static uint8_t g_air_mode = AIR_MODE_DEFAULT;
 static uint8_t g_apts_mode = APTS_MODE_DEFAULT;
 static uint8_t g_hide_ground = HIDE_GROUND_DEFAULT;
 static uint8_t g_map_enabled = MAP_ENABLED_DEFAULT;
+static uint8_t g_squawk_alert_enabled = SQUAWK_ALERT_DEFAULT;
 static uint8_t g_lang = LANG_DEFAULT;
 static uint8_t g_trail_len = TRAIL_LEN_DEFAULT;
 static uint16_t g_max_aircraft = MAX_AIRCRAFT_DEFAULT;
@@ -127,6 +129,10 @@ static void load_settings_from_nvs(void) {
     if (g_map_enabled > 1) {
         g_map_enabled = MAP_ENABLED_DEFAULT;
     }
+    nvs_get_u8(my_handle, "sqk_alert", &g_squawk_alert_enabled);
+    if (g_squawk_alert_enabled > 1) {
+        g_squawk_alert_enabled = SQUAWK_ALERT_DEFAULT;
+    }
     nvs_get_u8(my_handle, "lang", &g_lang);
     if (g_lang > 1) {
         g_lang = LANG_DEFAULT;
@@ -160,6 +166,7 @@ static void save_settings_to_nvs(void) {
     nvs_set_u8(my_handle, "apts_mode", g_apts_mode);
     nvs_set_u8(my_handle, "hide_ground", g_hide_ground);
     nvs_set_u8(my_handle, "map_en", g_map_enabled);
+    nvs_set_u8(my_handle, "sqk_alert", g_squawk_alert_enabled);
     nvs_set_u8(my_handle, "lang", g_lang);
     nvs_set_u8(my_handle, "trail_len", g_trail_len);
     nvs_set_u16(my_handle, "max_aircraft", g_max_aircraft);
@@ -189,6 +196,10 @@ bool wifi_mgr_get_hide_ground(void) {
 
 bool wifi_mgr_get_map_enabled(void) {
     return g_map_enabled == 1;
+}
+
+bool wifi_mgr_get_squawk_alert_enabled(void) {
+    return g_squawk_alert_enabled == 1;
 }
 
 app_lang_t wifi_mgr_get_lang(void) {
@@ -313,6 +324,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "#wifi-select{cursor:pointer;}"
         "#map{height:280px;border-radius:8px;margin-top:10px;display:none;border:1px solid #145;overflow:hidden;}"
         "small{display:block;color:#8b949e;margin-top:6px;font-size:0.8em;}"
+        ".tip{color:#7a889b;font-size:0.85em;cursor:help;margin-left:4px;}"
         ".btn-save{width:100%%;padding:14px;background:#238636;color:#fff;font-weight:bold;"
         "border:none;border-radius:8px;font-size:1.05em;cursor:pointer;margin-top:6px;transition:background .15s;}"
         ".btn-save:hover{background:#00c853;}"
@@ -388,18 +400,18 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         g_default_range == 200 ? "selected" : "", g_default_range == 250 ? "selected" : "");
 
     hb_append(&hb,
-        "<div><label>%s</label>"
+        "<div><label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label>"
         "<input type=\"number\" name=\"max_aircraft\" min=\"10\" max=\"200\" value=\"%u\" "
         "oninput=\"if(this.value>200){alert('MAX limit is 200 aircraft!'); this.value=200;} "
         "if(this.value<10 && this.value!=''){this.value=10;}\">"
         "</div>",
-        T(STR_WEB_MAX_AIRCRAFT), g_max_aircraft);
+        T(STR_WEB_MAX_AIRCRAFT), T(STR_WEB_MAX_AIRCRAFT_HELP), g_max_aircraft);
 
     hb_append(&hb,
-        "<div><label>%s</label><select name='air_mode'>"
+        "<div><label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label><select name='air_mode'>"
         "<option value='0' %s>%s</option><option value='1' %s>%s</option><option value='2' %s>%s</option>"
         "</select></div>",
-        T(STR_WEB_AIR_FILTER),
+        T(STR_WEB_AIR_FILTER), T(STR_WEB_AIR_FILTER_HINT),
         g_air_mode == 0 ? "selected" : "", T(STR_WEB_AIR_ALL),
         g_air_mode == 1 ? "selected" : "", T(STR_WEB_AIR_CIVIL),
         g_air_mode == 2 ? "selected" : "", T(STR_WEB_AIR_MIL));
@@ -419,6 +431,14 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         T(STR_WEB_MAP),
         g_map_enabled == 1 ? "selected" : "", T(STR_WEB_MAP_ON),
         g_map_enabled == 0 ? "selected" : "", T(STR_WEB_MAP_OFF));
+
+    hb_append(&hb,
+        "<div><label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label><select name='sqk_alert'>"
+        "<option value='1' %s>%s</option><option value='0' %s>%s</option>"
+        "</select></div>",
+        T(STR_WEB_SQUAWK_ALERT), T(STR_WEB_SQUAWK_ALERT_HINT),
+        g_squawk_alert_enabled == 1 ? "selected" : "", T(STR_WEB_SQUAWK_ON),
+        g_squawk_alert_enabled == 0 ? "selected" : "", T(STR_WEB_SQUAWK_OFF));
 
     hb_append(&hb,
         "<div><label>%s</label><select name='apts'>"
@@ -442,7 +462,6 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         g_trail_len == 120 ? "selected" : "", T(STR_WEB_TRAIL_120));
 
     hb_append(&hb, "</div>"); // .grid2
-    hb_append(&hb, "<small>%s</small>", T(STR_WEB_MAX_AIRCRAFT_HELP));
     hb_append(&hb, "</div>"); // karta 4
 
     hb_append(&hb,
@@ -610,6 +629,10 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     if (httpd_query_key_value(buf, "map_en", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
         g_map_enabled = (atoi(param) == 1) ? 1 : 0;
+    }
+    if (httpd_query_key_value(buf, "sqk_alert", param, sizeof(param)) == ESP_OK) {
+        url_decode(param);
+        g_squawk_alert_enabled = (atoi(param) == 1) ? 1 : 0;
     }
     if (httpd_query_key_value(buf, "lang", param, sizeof(param)) == ESP_OK) {
         url_decode(param);

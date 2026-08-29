@@ -41,6 +41,10 @@ bool wifi_mgr_get_hide_ground(void);
 // Czy domyslnie wyswietlac warstwe mapy w tle radaru (MAP) z NVS.
 bool wifi_mgr_get_map_enabled(void);
 
+// Czy pokazywac pulsujacy baner alarmowy przy wykryciu kodu awaryjnego
+// squawk (7700/7600/7500) z NVS.
+bool wifi_mgr_get_squawk_alert_enabled(void);
+
 // Dlugosc sladu lotu (liczba punktow historii trasy rysowanych za
 // samolotem) z NVS. 0 = slad wylaczony. Dozwolone wartosci: 0/15/30/60/120.
 uint8_t wifi_mgr_get_trail_len(void);

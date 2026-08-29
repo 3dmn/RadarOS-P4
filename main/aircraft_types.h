@@ -69,6 +69,7 @@ typedef struct {
     char category[4];
     char squawk[8];
     char vsi_str[10];
+    int vsi_fpm;
     float lat;
     float lon;
     float distance_km;

@@ -196,7 +196,8 @@ static bool json_get_int(const char *block, const char *end, const char *key, in
 
 static const char *military_callsign_prefixes[] = {
     "PLF", "RCH", "NATO", "VIP", "GAF", "IAM", "BAF", "ASY",
-    "FORTE", "HOMER", "LAGR", "DUKE", "NAF", "HAF"
+    "FORTE", "HOMER", "LAGR", "DUKE", "NAF", "HAF",
+    "RRR", "BOXER", "REDEYE", "NCHO", "JAKE", "MMF", "FAF", "CFC", "HKY"
 };
 #define NUM_MIL_PREFIXES (sizeof(military_callsign_prefixes) / sizeof(military_callsign_prefixes[0]))
 
@@ -268,10 +269,12 @@ static int parse_adsb_json(const char *json, AircraftData *out_planes, int max_p
 
         int vsi_val = 0;
         if (json_get_int(p, end, "baro_rate", &vsi_val)) {
+            plane->vsi_fpm = vsi_val;
             if (vsi_val > 64) snprintf(plane->vsi_str, sizeof(plane->vsi_str), "+%d", vsi_val);
             else if (vsi_val < -64) snprintf(plane->vsi_str, sizeof(plane->vsi_str), "%d", vsi_val);
             else strcpy(plane->vsi_str, "LEVEL");
         } else {
+            plane->vsi_fpm = 0;
             strcpy(plane->vsi_str, "LEVEL");
         }
 
