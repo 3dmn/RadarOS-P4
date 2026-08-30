@@ -28,6 +28,9 @@ RadarOS-P4 zamienia moduł **ESP32-P4** z **7-calowym ekranem dotykowym MIPI-DSI
 - [Nota prawna i licencja](#nota-prawna-i-licencja)
 
 ---
+<p align="center">
+  <img src="docs/images/IMG_0507.JPEG" alt="Radar Screen" width="700">
+</p>
 
 ## Kluczowe funkcje
 
