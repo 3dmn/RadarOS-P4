@@ -7,6 +7,7 @@
 #include "photo_service.h"
 #include "map_tile_service.h"
 #include "mqtt_service.h"
+#include "ota_update_service.h"
 
 void app_main(void) {
     wifi_manager_init();
@@ -25,4 +26,5 @@ void app_main(void) {
     adsb_service_start();
     photo_service_start();
     mqtt_service_start();
+    ota_update_service_start();
 }

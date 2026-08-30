@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <math.h>
@@ -21,6 +22,7 @@
 #include "radar_ui.h"
 #include "adsb_service.h"
 #include "aircraft_types.h"
+#include "ota_update_service.h"
 
 static const char *TAG = "MQTT_SVC";
 
@@ -141,6 +143,51 @@ static void publish_discovery_entity(const discovery_spec_t *spec) {
     publish_json(cfg_topic, root, true);
 }
 
+// Home Assistant's MQTT "update" platform uses its own JSON state schema
+// (installed_version/latest_version/release_url in one state payload)
+// instead of the generic discovery_spec_t on/off or plain-string entities,
+// so it gets its own discovery/state publisher rather than a table row.
+static void publish_update_discovery(void) {
+    char cfg_topic[MQTT_TOPIC_MAX_LEN], state_topic[MQTT_TOPIC_MAX_LEN], cmd_topic[MQTT_TOPIC_MAX_LEN];
+    char unique_id[80];
+    topic_build(cfg_topic, sizeof(cfg_topic), "update", "firmware", "config");
+    topic_build(state_topic, sizeof(state_topic), "update", "firmware", "state");
+    topic_build(cmd_topic, sizeof(cmd_topic), "update", "firmware", "set");
+    snprintf(unique_id, sizeof(unique_id), "%s_firmware", s_node_id);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "name", "Firmware");
+    cJSON_AddStringToObject(root, "unique_id", unique_id);
+    cJSON_AddStringToObject(root, "availability_topic", s_availability_topic);
+    cJSON_AddStringToObject(root, "state_topic", state_topic);
+    cJSON_AddStringToObject(root, "command_topic", cmd_topic);
+    cJSON_AddStringToObject(root, "payload_install", "INSTALL");
+    cJSON_AddStringToObject(root, "device_class", "firmware");
+    cJSON_AddStringToObject(root, "icon", "mdi:cloud-download-outline");
+    add_device_json(root);
+    publish_json(cfg_topic, root, true);
+}
+
+static void publish_update_state(void) {
+    char topic[MQTT_TOPIC_MAX_LEN];
+    topic_build(topic, sizeof(topic), "update", "firmware", "state");
+
+    const char *installed = ota_update_get_installed_version();
+    const char *latest = ota_update_get_latest_version();
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "title", FW_NAME);
+    cJSON_AddStringToObject(root, "installed_version", installed);
+    // Falls back to the installed version when no check has completed yet,
+    // so the entity reads "up to date" instead of a blank/invalid version.
+    cJSON_AddStringToObject(root, "latest_version", latest[0] ? latest : installed);
+    const char *release_url = ota_update_get_release_url();
+    if (release_url[0]) cJSON_AddStringToObject(root, "release_url", release_url);
+    const char *notes = ota_update_get_release_notes();
+    if (notes[0]) cJSON_AddStringToObject(root, "release_summary", notes);
+    publish_json(topic, root, true);
+}
+
 static const char *RANGE_OPTIONS[] = {"10 km", "20 km", "30 km", "50 km", "100 km", "150 km", "200 km", "250 km"};
 static const char *AIR_FILTER_OPTIONS[] = {"All", "Civil Only", "Military & Rescue"};
 static const char *TRAIL_LEN_OPTIONS[] = {"Short", "Medium", "Long", "Maximum"};
@@ -259,6 +306,18 @@ static void publish_all_discovery(void) {
     s.component = "sensor"; s.object_id = "free_heap"; s.name = "Free Heap";
     s.icon = "mdi:memory"; s.unit = "kB"; s.state_class = "measurement"; s.has_state = true;
     publish_discovery_entity(&s);
+
+    memset(&s, 0, sizeof(s));
+    s.component = "switch"; s.object_id = "auto_update"; s.name = "Auto-Update";
+    s.icon = "mdi:cloud-sync-outline"; s.has_command = true; s.has_state = true;
+    publish_discovery_entity(&s);
+
+    memset(&s, 0, sizeof(s));
+    s.component = "binary_sensor"; s.object_id = "update_available"; s.name = "Update Available";
+    s.device_class = "update"; s.icon = "mdi:cloud-download-outline"; s.has_state = true;
+    publish_discovery_entity(&s);
+
+    publish_update_discovery();
 
     ESP_LOGI(TAG, "Published Home Assistant MQTT Discovery config for all entities");
 }
@@ -437,13 +496,31 @@ void mqtt_service_publish_state(void) {
 
     snprintf(buf, sizeof(buf), "%u", (unsigned)(esp_get_free_heap_size() / 1024));
     publish_state_str("sensor", "free_heap", buf);
+
+    publish_state_str("switch", "auto_update", wifi_mgr_get_auto_update_enabled() ? "ON" : "OFF");
+    publish_state_str("binary_sensor", "update_available", ota_update_is_available() ? "ON" : "OFF");
+    publish_update_state();
 }
 
 // ================= COMMAND HANDLING (.../set topics) =================
+// arg: delay in ms (passed as a pointer value, not an address) - long
+// enough for the MQTT ack/state publish and the NVS write it follows to
+// fully complete before the reboot tears down the network stack.
 static void restart_task(void *arg) {
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    uint32_t delay_ms = (uint32_t)(uintptr_t)arg;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
     esp_restart();
+}
+
+// Accepts every reasonable spelling Home Assistant (or a manual MQTT
+// publish) might send for each language, so a mismatched string casing or
+// a raw language code never silently falls back to the wrong language.
+static app_lang_t language_from_payload(const char *payload) {
+    if (strcasecmp(payload, "Polski") == 0 || strcasecmp(payload, "Polish") == 0 ||
+        strcasecmp(payload, "pl") == 0) {
+        return LANG_PL;
+    }
+    return LANG_EN;
 }
 
 static void set_apt_type_bit(uint8_t bit, bool on) {
@@ -488,13 +565,27 @@ static void handle_command(const char *topic, const char *payload) {
     } else if (topic_is(topic, "select", "language")) {
         // Matches the existing web panel behavior: a language change is
         // applied to every static LCD/web string only after a reboot.
-        wifi_mgr_set_lang(strcmp(payload, "Polski") == 0 ? LANG_PL : LANG_EN);
-        ESP_LOGI(TAG, "Language changed via MQTT/Home Assistant, restarting to apply...");
-        xTaskCreate(restart_task, "mqtt_restart", 2048, NULL, 5, NULL);
+        app_lang_t new_lang = language_from_payload(payload);
+        wifi_mgr_set_lang(new_lang); // persists to NVS immediately, see wifi_manager.c
+        ESP_LOGI(TAG, "Language changed to %s via MQTT/Home Assistant, restarting to apply...",
+                 new_lang == LANG_PL ? "Polish" : "English");
+        // Publish the fresh state (language included, retained) before the
+        // reboot, so Home Assistant reflects the change immediately even
+        // though the device becomes briefly unavailable.
+        mqtt_service_publish_state();
+        // Give the MQTT publish and the NVS write time to fully complete
+        // before esp_restart() tears down the network stack.
+        xTaskCreate(restart_task, "mqtt_restart", 2048, (void *)(uintptr_t)1200, 5, NULL);
         return;
     } else if (topic_is(topic, "button", "restart")) {
         ESP_LOGI(TAG, "Restart command received via MQTT/Home Assistant");
-        xTaskCreate(restart_task, "mqtt_restart", 2048, NULL, 5, NULL);
+        xTaskCreate(restart_task, "mqtt_restart", 2048, (void *)(uintptr_t)1000, 5, NULL);
+        return;
+    } else if (topic_is(topic, "switch", "auto_update")) {
+        wifi_mgr_set_auto_update_en(strcmp(payload, "ON") == 0);
+    } else if (topic_is(topic, "update", "firmware")) {
+        ESP_LOGI(TAG, "Firmware install command received via MQTT/Home Assistant");
+        ota_update_install_now();
         return;
     } else {
         ESP_LOGW(TAG, "Received command on unrecognized topic: %s", topic);
@@ -511,6 +602,7 @@ static void subscribe_all_commands(void) {
         {"switch", "gnd"}, {"switch", "map"}, {"switch", "squawk_alert"}, {"switch", "apts"},
         {"switch", "apt_commercial"}, {"switch", "apt_military"}, {"switch", "apt_aeroclubs"},
         {"select", "trail_length"}, {"select", "language"}, {"button", "restart"},
+        {"switch", "auto_update"}, {"update", "firmware"},
     };
     for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
         char topic[MQTT_TOPIC_MAX_LEN];

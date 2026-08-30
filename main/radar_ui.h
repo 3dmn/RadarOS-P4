@@ -38,30 +38,28 @@ void radar_ui_set_aircraft_photo(const lv_image_dsc_t *img_dsc, const char *phot
 // bsp_display_lock(), same as the touch event handlers).
 
 // Jumps the radar scale to the closest supported step to km (see
-// range_steps[] in aircraft_types.h) - not persisted to NVS, matching the
-// existing RNG button behavior (resets to the configured default on reboot).
+// range_steps[] in aircraft_types.h) and persists it to NVS (wifi_manager's
+// "default range"), so the radar reopens at the same range after a reboot.
 void radar_ui_set_range_km(float km);
 float radar_ui_get_range_km(void);
 
-// AIR traffic filter (ALL/CIVIL/MIL) - not persisted to NVS, matching the
-// existing AIR button behavior.
+// AIR traffic filter (ALL/CIVIL/MIL) - persisted to NVS immediately.
 void radar_ui_set_air_filter(air_filter_mode_t mode);
 air_filter_mode_t radar_ui_get_air_filter(void);
 
 // Ground traffic (GND) visibility - true shows aircraft on the ground, false
-// hides them (matches the on-screen "GND: ON/OFF" label). Not persisted to
-// NVS, matching the existing GND button behavior.
+// hides them (matches the on-screen "GND: ON/OFF" label). Persisted to NVS
+// immediately.
 void radar_ui_set_show_ground(bool show);
 bool radar_ui_get_show_ground(void);
 
-// Nearby-airports overlay (APTS) - not persisted to NVS, matching the
-// existing APTS button behavior.
+// Nearby-airports overlay (APTS) - persisted to NVS immediately.
 void radar_ui_set_airports_enabled(bool on);
 bool radar_ui_get_airports_enabled(void);
 
-// Background tile map layer (MAP) - not persisted to NVS, matching the
-// existing MAP button behavior. Thin wrapper over map_tile_service that also
-// updates the on-screen MAP button style and notifies mqtt_service.
+// Background tile map layer (MAP) - persisted to NVS immediately. Thin
+// wrapper over map_tile_service that also updates the on-screen MAP button
+// style and notifies mqtt_service.
 void radar_ui_set_map_enabled(bool on);
 bool radar_ui_get_map_enabled(void);
 
@@ -118,3 +116,11 @@ void radar_ui_update_wifi_status(wifi_status_t status);
 // enabled=false hides the MQTT LED entirely (and the badge shrinks to fit
 // just the Wi-Fi indicator); status is only meaningful when enabled=true.
 void radar_ui_update_mqtt_status(bool enabled, mqtt_conn_status_t status);
+
+// Firmware update indicator, appended to the same HUD status badge. Hidden
+// by default; appears (with a pulsing amber icon) only once
+// ota_update_service.c has confirmed a newer release is available. Tapping
+// it shows a brief toast with the version number. available=false hides the
+// icon again (and the badge shrinks back down); latest_version may be
+// NULL/ignored when available=false.
+void radar_ui_update_fw_status(bool available, const char *latest_version);

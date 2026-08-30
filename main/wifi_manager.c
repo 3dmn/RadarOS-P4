@@ -24,6 +24,7 @@
 #include "wifi_manager.h"
 #include "version.h"
 #include "mqtt_service.h"
+#include "ota_update_service.h"
 #include "radar_ui.h"
 
 #define NVS_NAMESPACE           "radar_cfg"
@@ -52,6 +53,7 @@
 #define MQTT_PORT_DEFAULT       1883
 #define MQTT_HA_DISCOVERY_DEFAULT 1
 #define MQTT_DEVICE_ID_DEFAULT  "radaros_p4"
+#define AUTO_UPDATE_DEFAULT     0
 
 #define AP_SSID                 "RadarADSB-Setup"
 #define AP_CHANNEL               1
@@ -89,6 +91,8 @@ uint16_t g_mqtt_port = MQTT_PORT_DEFAULT;
 char g_mqtt_user[MQTT_USER_LEN] = "";
 char g_mqtt_pass[MQTT_PASS_LEN] = "";
 char g_mqtt_device_id[MQTT_DEVICE_ID_LEN] = MQTT_DEVICE_ID_DEFAULT;
+char g_ota_version_url[OTA_VERSION_URL_LEN] = "";
+static uint8_t g_auto_update_enabled = AUTO_UPDATE_DEFAULT;
 
 static bool is_valid_trail_len(uint8_t len) {
     return len == 0 || len == 15 || len == 30 || len == 60 || len == 120;
@@ -186,6 +190,10 @@ static void load_settings_from_nvs(void) {
     if (g_mqtt_device_id[0] == '\0') {
         snprintf(g_mqtt_device_id, sizeof(g_mqtt_device_id), "%s", MQTT_DEVICE_ID_DEFAULT);
     }
+    len = sizeof(g_ota_version_url);
+    nvs_get_str(my_handle, "ota_url", g_ota_version_url, &len);
+    nvs_get_u8(my_handle, "auto_upd", &g_auto_update_enabled);
+    if (g_auto_update_enabled > 1) g_auto_update_enabled = AUTO_UPDATE_DEFAULT;
 
     nvs_close(my_handle);
     ESP_LOGI(TAG, "Loaded from NVS: SSID='%s' station='%s' (%.6f, %.6f)",
@@ -220,6 +228,8 @@ static void save_settings_to_nvs(void) {
     nvs_set_str(my_handle, "mqtt_user", g_mqtt_user);
     nvs_set_str(my_handle, "mqtt_pass", g_mqtt_pass);
     nvs_set_str(my_handle, "mqtt_devid", g_mqtt_device_id);
+    nvs_set_str(my_handle, "ota_url", g_ota_version_url);
+    nvs_set_u8(my_handle, "auto_upd", g_auto_update_enabled);
     nvs_commit(my_handle);
     nvs_close(my_handle);
 }
@@ -240,12 +250,32 @@ int wifi_mgr_get_default_range(void) {
     return g_default_range;
 }
 
+void wifi_mgr_set_default_range(uint16_t range_km) {
+    static const uint16_t valid_ranges[] = {10, 20, 30, 50, 100, 150, 200, 250};
+    bool valid = false;
+    for (size_t i = 0; i < sizeof(valid_ranges) / sizeof(valid_ranges[0]); i++) {
+        if (valid_ranges[i] == range_km) { valid = true; break; }
+    }
+    g_default_range = valid ? range_km : DEFAULT_RANGE_DEFAULT;
+    save_settings_to_nvs();
+}
+
 uint8_t wifi_mgr_get_default_air_mode(void) {
     return g_air_mode;
 }
 
+void wifi_mgr_set_default_air_mode(uint8_t mode) {
+    g_air_mode = (mode <= 2) ? mode : AIR_MODE_DEFAULT;
+    save_settings_to_nvs();
+}
+
 uint8_t wifi_mgr_get_default_apts_mode(void) {
     return g_apts_mode;
+}
+
+void wifi_mgr_set_default_apts_mode(bool on) {
+    g_apts_mode = on ? 1 : 0;
+    save_settings_to_nvs();
 }
 
 uint8_t wifi_mgr_get_apt_filter_mask(void) {
@@ -261,8 +291,18 @@ bool wifi_mgr_get_hide_ground(void) {
     return g_hide_ground == 1;
 }
 
+void wifi_mgr_set_hide_ground(bool hide) {
+    g_hide_ground = hide ? 1 : 0;
+    save_settings_to_nvs();
+}
+
 bool wifi_mgr_get_map_enabled(void) {
     return g_map_enabled == 1;
+}
+
+void wifi_mgr_set_map_enabled(bool on) {
+    g_map_enabled = on ? 1 : 0;
+    save_settings_to_nvs();
 }
 
 bool wifi_mgr_get_squawk_alert_enabled(void) {
@@ -281,6 +321,7 @@ app_lang_t wifi_mgr_get_lang(void) {
 void wifi_mgr_set_lang(app_lang_t lang) {
     g_lang = (lang == LANG_PL) ? LANG_PL : LANG_EN;
     i18n_set_lang((app_lang_t)g_lang);
+    save_settings_to_nvs();
 }
 
 uint8_t wifi_mgr_get_trail_len(void) {
@@ -289,6 +330,7 @@ uint8_t wifi_mgr_get_trail_len(void) {
 
 void wifi_mgr_set_trail_len(uint8_t len) {
     g_trail_len = is_valid_trail_len(len) ? len : TRAIL_LEN_DEFAULT;
+    save_settings_to_nvs();
 }
 
 uint16_t wifi_mgr_get_max_aircraft(void) {
@@ -305,6 +347,15 @@ bool wifi_mgr_get_mqtt_enabled(void) {
 
 bool wifi_mgr_get_mqtt_ha_discovery(void) {
     return g_mqtt_ha_discovery == 1;
+}
+
+bool wifi_mgr_get_auto_update_enabled(void) {
+    return g_auto_update_enabled == 1;
+}
+
+void wifi_mgr_set_auto_update_en(bool on) {
+    g_auto_update_enabled = on ? 1 : 0;
+    save_settings_to_nvs();
 }
 
 // ================= WEB PANEL =================
@@ -717,6 +768,41 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "</div>",
         T(STR_WEB_OTA_SECTION), T(STR_WEB_OTA_FILE_LABEL), T(STR_WEB_OTA_BTN));
 
+    // Firmware update check (version.json manifest) - inert until a URL is
+    // configured; ota_update_service.c performs the periodic checks.
+    {
+        bool upd_avail = ota_update_is_available();
+        const char *latest = ota_update_get_latest_version();
+        char latest_line[80];
+        if (latest[0] == '\0') {
+            snprintf(latest_line, sizeof(latest_line), "%s", T(STR_WEB_FWUPD_UNKNOWN));
+        } else {
+            snprintf(latest_line, sizeof(latest_line), "v%s (%s)", latest,
+                      upd_avail ? T(STR_WEB_FWUPD_AVAILABLE) : T(STR_WEB_FWUPD_UP_TO_DATE));
+        }
+        hb_append(&hb,
+            "<div style='margin-top:18px;border-top:1px solid #30363d;padding-top:14px;'>"
+            "<label style='color:#00ff88;font-weight:bold;'>\xF0\x9F\x94\x84 %s</label>"
+            "<div class='statrow'><span>%s</span><span>v%s</span></div>"
+            "<div class='statrow'><span>%s</span><span>%s</span></div>"
+            "<label style='margin-top:8px;'>%s</label>"
+            "<input type='text' name='ota_url' value='%s' maxlength='191' placeholder='https://.../version.json'>"
+            "<label style='margin-top:2px;'>%s</label>"
+            "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
+            "<label class=\"switch\"><input type=\"checkbox\" name=\"auto_update_en\" value=\"1\" %s>"
+            "<span class=\"slider\"></span></label></div>"
+            "<button type='button' class='geobtn' style='margin-top:10px;' onclick='checkForUpdates()'>%s</button>"
+            "<p id='check-update-status' class='hint'></p>"
+            "</div>",
+            T(STR_WEB_FWUPD_SECTION),
+            T(STR_WEB_FWUPD_CURRENT), ota_update_get_installed_version(),
+            T(STR_WEB_FWUPD_LATEST), latest_line,
+            T(STR_WEB_FWUPD_REPO), g_ota_version_url,
+            T(STR_WEB_FWUPD_REPO_HINT),
+            T(STR_WEB_FWUPD_AUTO), g_auto_update_enabled == 1 ? "checked" : "",
+            T(STR_WEB_FWUPD_CHECK_BTN));
+    }
+
     hb_append(&hb, "</div>"); // #tab-system
 
     // TAB: MQTT & Home Assistant
@@ -776,7 +862,8 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "saving:'%s',rebooting:'%s',saveError:'%s',"
         "importOk:'%s',importError:'%s',importSelectFile:'%s',"
         "otaUploading:'%s',otaOk:'%s',otaError:'%s',otaSelectFile:'%s',"
-        "mqttConnected:'%s',mqttConnecting:'%s',mqttError:'%s',mqttDisabled:'%s'};"
+        "mqttConnected:'%s',mqttConnecting:'%s',mqttError:'%s',mqttDisabled:'%s',"
+        "fwChecking:'%s',fwCheckError:'%s'};"
         "var __map=null,__marker=null;"
         "function showTab(name){"
         "['display','location','wifi','system','mqtt'].forEach(function(k){"
@@ -892,6 +979,13 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "xhr.onerror=function(){st.textContent=I18N.otaError;btn.disabled=false;};"
         "xhr.send(f.files[0]);"
         "}"
+        "function checkForUpdates(){"
+        "var st=document.getElementById('check-update-status');"
+        "st.textContent=I18N.fwChecking;"
+        "fetch('/check_update',{method:'POST'})"
+        ".then(function(){setTimeout(function(){window.location.reload();},4000);})"
+        ".catch(function(){st.textContent=I18N.fwCheckError;});"
+        "}"
         "function pollMqttStatus(){"
         "var el=document.getElementById('mqtt-status-val');"
         "var led=document.getElementById('mqtt-led');"
@@ -919,7 +1013,8 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         T(STR_WEB_IMPORT_OK), T(STR_WEB_IMPORT_ERROR), T(STR_WEB_IMPORT_SELECT_FILE),
         T(STR_WEB_OTA_UPLOADING), T(STR_WEB_OTA_OK), T(STR_WEB_OTA_ERROR), T(STR_WEB_OTA_SELECT_FILE),
         T(STR_WEB_MQTT_STATUS_CONNECTED), T(STR_WEB_MQTT_STATUS_CONNECTING),
-        T(STR_WEB_MQTT_STATUS_ERROR), T(STR_WEB_MQTT_STATUS_DISABLED));
+        T(STR_WEB_MQTT_STATUS_ERROR), T(STR_WEB_MQTT_STATUS_DISABLED),
+        T(STR_WEB_FWUPD_CHECKING), T(STR_WEB_FWUPD_CHECK_ERROR));
 
     if (hb.pos >= hb.cap - 1) {
         ESP_LOGE(TAG, "Web page exceeded buffer (%d B) - response truncated!", HTML_PAGE_BUF_SIZE);
@@ -958,7 +1053,7 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     }
     buf[received] = '\0';
 
-    char param[96];
+    char param[OTA_VERSION_URL_LEN];
     if (httpd_query_key_value(buf, "ssid", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
         snprintf(g_wifi_ssid, sizeof(g_wifi_ssid), "%s", param);
@@ -1055,6 +1150,11 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         url_decode(param);
         mqtt_sanitize_topic_id(param, g_mqtt_device_id, sizeof(g_mqtt_device_id));
     }
+    if (httpd_query_key_value(buf, "ota_url", param, sizeof(param)) == ESP_OK) {
+        url_decode(param);
+        snprintf(g_ota_version_url, sizeof(g_ota_version_url), "%s", param);
+    }
+    g_auto_update_enabled = (httpd_query_key_value(buf, "auto_update_en", param, sizeof(param)) == ESP_OK) ? 1 : 0;
     free(buf);
 
     save_settings_to_nvs();
@@ -1095,6 +1195,8 @@ static esp_err_t export_config_get_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(root, "mqtt_user", g_mqtt_user);
     cJSON_AddStringToObject(root, "mqtt_device_id", g_mqtt_device_id);
     cJSON_AddNumberToObject(root, "mqtt_ha_discovery", g_mqtt_ha_discovery);
+    cJSON_AddStringToObject(root, "ota_url", g_ota_version_url);
+    cJSON_AddNumberToObject(root, "auto_update_enabled", g_auto_update_enabled);
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1223,6 +1325,12 @@ static esp_err_t import_config_post_handler(httpd_req_t *req) {
     }
     if ((item = cJSON_GetObjectItem(root, "mqtt_ha_discovery")) && cJSON_IsNumber(item)) {
         g_mqtt_ha_discovery = (item->valueint == 1) ? 1 : 0;
+    }
+    if ((item = cJSON_GetObjectItem(root, "ota_url")) && cJSON_IsString(item)) {
+        snprintf(g_ota_version_url, sizeof(g_ota_version_url), "%s", item->valuestring);
+    }
+    if ((item = cJSON_GetObjectItem(root, "auto_update_enabled")) && cJSON_IsNumber(item)) {
+        g_auto_update_enabled = (item->valueint == 1) ? 1 : 0;
     }
     cJSON_Delete(root);
 
@@ -1498,6 +1606,16 @@ static esp_err_t mqtt_status_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Triggers an out-of-cycle firmware version check in the background and
+// returns immediately - the browser reloads the System tab a few seconds
+// later to pick up the fresh installed/latest version fields.
+static esp_err_t check_update_post_handler(httpd_req_t *req) {
+    ota_update_check_now();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
 static void start_web_server(void) {
     if (g_web_server != NULL) {
         return;
@@ -1513,6 +1631,7 @@ static void start_web_server(void) {
     httpd_uri_t import_uri = {.uri = "/import_config", .method = HTTP_POST, .handler = import_config_post_handler};
     httpd_uri_t update_uri = {.uri = "/update", .method = HTTP_POST, .handler = update_post_handler};
     httpd_uri_t mqtt_status_uri = {.uri = "/mqtt_status", .method = HTTP_GET, .handler = mqtt_status_get_handler};
+    httpd_uri_t check_update_uri = {.uri = "/check_update", .method = HTTP_POST, .handler = check_update_post_handler};
 
     if (httpd_start(&g_web_server, &config) == ESP_OK) {
         httpd_register_uri_handler(g_web_server, &root_uri);
@@ -1523,6 +1642,7 @@ static void start_web_server(void) {
         httpd_register_uri_handler(g_web_server, &import_uri);
         httpd_register_uri_handler(g_web_server, &update_uri);
         httpd_register_uri_handler(g_web_server, &mqtt_status_uri);
+        httpd_register_uri_handler(g_web_server, &check_update_uri);
         ESP_LOGI(TAG, "Radar configuration web panel started on port 80!");
     }
 }
