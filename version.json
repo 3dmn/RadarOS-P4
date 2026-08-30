@@ -1,5 +1,5 @@
 {
-  "version": "1.1.1",
-  "url": "https://github.com/vmisiek/RadarOS-P4/releases/download/v1.1.1/RadarOS-P4.bin",
-  "notes": "Added animated HUD update indicator, full Home Assistant MQTT discovery support, iOS toggles, and OTA stability improvements."
+  "version": "1.0.0",
+  "url": "https://github.com/vmisiek/RadarOS-P4/releases/download/v1.0.0/RadarOS-P4.bin",
+  "notes": "RadarOS P4 v1.0.0 - Initial official release with ADS-B tracking, dynamic radius, HUD capsule, and full Home Assistant MQTT integration."
 }
