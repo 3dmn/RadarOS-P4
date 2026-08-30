@@ -30,7 +30,7 @@ RadarOS P4 turns an ESP32-P4 with a 7" touchscreen into a self-contained air-tra
 - **Dual Mode Data Engine** — real-time live ADS-B decoders and Wi-Fi cloud feeds (adsb.fi / airplanes.live), so the station works both as a networked receiver client and alongside local decoding hardware.
 - **Global Categorized Airport Database** — hundreds of airports worldwide split into **Commercial Hubs**, **Military Air Bases**, and **General Aviation & Aeroclubs**, each independently toggleable and rendered only within the active radar range for full 60 FPS performance.
 - **Emergency Squawk Alerts** — instant, pulsing full-width HUD banner on transponder codes **7700** (Emergency), **7600** (Radio Failure), and **7500** (Hijack).
-- **Modern Tabbed Web Panel** — Awtrix 3‑inspired, responsive dark/neon-green UI (Radar & Display · Location · Wi-Fi & Network · System) that auto-switches its default tab to Wi-Fi when the device is serving its setup access point.
+- **Modern Tabbed Web Interface** — responsive dark/neon cockpit UI (Radar & Display · Location · Wi-Fi & Network · System) with Wi-Fi AP auto-switch, defaulting to the Wi-Fi tab when the device is serving its setup access point.
 - **Interactive Square Map Location Picker** — Leaflet-powered, true 1:1 aspect-ratio map for pinpointing the station's GPS coordinates with a tap.
 - **JSON Configuration Backup & Restore** — one-click export of every NVS setting to `radar_config.json`, and one-click import to restore or clone a station's configuration.
 - **Seamless Web OTA Updates** — dual 8 MB OTA partition layout with a browser-based firmware flasher (drag a `.bin`, watch the progress bar, auto-reboot).

@@ -425,7 +425,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "<form id='cfgForm' onsubmit='return saveConfig(event)'>",
         T(STR_WEB_PAGE_TITLE), T(STR_WEB_PAGE_TITLE));
 
-    // Pasek zakladek (Awtrix-style top tabs) - przelaczanie widokow czystym
+    // Pasek zakladek (top tabs) - przelaczanie widokow czystym
     // JS (element.style.display), patrz showTab() w <script> ponizej.
     hb_append(&hb,
         "<div class='tabbar'>"
