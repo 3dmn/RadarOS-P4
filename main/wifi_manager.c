@@ -32,6 +32,9 @@
 #define WIFI_SSID_DEFAULT       ""
 #define WIFI_PASS_DEFAULT       ""
 #define STATION_NAME_DEFAULT    "RADAR-STATION"
+// Default demo coordinates - Warsaw Chopin Airport (EPWA). Only used until
+// the user sets their own station location on the Location tab; not a
+// real deployment's coordinates.
 #define RADAR_LAT_DEFAULT       52.1657f
 #define RADAR_LON_DEFAULT       20.9671f
 #define BRIGHTNESS_DEFAULT      100

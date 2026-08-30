@@ -316,7 +316,10 @@ static void publish_all_discovery(void) {
 
     memset(&s, 0, sizeof(s));
     s.component = "sensor"; s.object_id = "uptime"; s.name = "Uptime";
-    s.icon = "mdi:clock-outline"; s.unit = "s"; s.state_class = "total_increasing"; s.has_state = true;
+    // No unit/state_class: the state is a formatted duration string
+    // ("2h 15m 04s"), not a raw number, so Home Assistant should render it
+    // as plain text rather than trying to build long-term statistics on it.
+    s.icon = "mdi:timer-outline"; s.has_state = true;
     publish_discovery_entity(&s);
 
     memset(&s, 0, sizeof(s));
@@ -504,8 +507,25 @@ void mqtt_service_publish_state(void) {
         publish_state_str("sensor", "wifi_rssi", buf);
     }
 
-    snprintf(buf, sizeof(buf), "%lld", (long long)(esp_timer_get_time() / 1000000LL));
-    publish_state_str("sensor", "uptime", buf);
+    {
+        // Human-readable duration instead of a raw second count, so Home
+        // Assistant shows e.g. "2h 15m 04s" instead of "8104 s".
+        uint64_t uptime_sec = (uint64_t)(esp_timer_get_time() / 1000000LL);
+        unsigned days = (unsigned)(uptime_sec / 86400);
+        unsigned hours = (unsigned)((uptime_sec % 86400) / 3600);
+        unsigned mins = (unsigned)((uptime_sec % 3600) / 60);
+        unsigned secs = (unsigned)(uptime_sec % 60);
+
+        char uptime_str[32];
+        if (days > 0) {
+            snprintf(uptime_str, sizeof(uptime_str), "%ud %02uh %02um", days, hours, mins);
+        } else if (hours > 0) {
+            snprintf(uptime_str, sizeof(uptime_str), "%uh %02um %02us", hours, mins, secs);
+        } else {
+            snprintf(uptime_str, sizeof(uptime_str), "%um %02us", mins, secs);
+        }
+        publish_state_str("sensor", "uptime", uptime_str);
+    }
 
     snprintf(buf, sizeof(buf), "%u", (unsigned)(esp_get_free_heap_size() / 1024));
     publish_state_str("sensor", "free_heap", buf);
