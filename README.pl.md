@@ -49,7 +49,7 @@ RadarOS-P4 zamienia moduł **ESP32-P4** z **7-calowym ekranem dotykowym MIPI-DSI
 
 | Element | Specyfikacja |
 |---|---|
-| Płytka | **Waveshare ESP32-P4-WIFI6-Touch-LCD-7B** (lub zgodna płytka ESP32-P4 z tym samym okablowaniem ekranu i Wi-Fi) |
+| Płytka | **Waveshare ESP32-P4-WIFI6-Touch-LCD-7B** |
 | MCU | Espressif **ESP32-P4** — dwurdzeniowy RISC-V @ 400 MHz |
 | Pamięć | **32 MB zewnętrznej pamięci PSRAM** (wymagana — przechowuje bufory sieciowe, mapę kafelkową i sesje mbedTLS) |
 | Wyświetlacz | **7-calowy ekran dotykowy IPS**, MIPI DSI, **1024×600**, sterownik panelu EK79007 |
