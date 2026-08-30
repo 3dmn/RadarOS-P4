@@ -22,7 +22,7 @@ bool is_helicopter(const char *type);
 #define MAX_TRACK_HISTORY_PTS    120
 #define MAX_HUD_SEGS             32
 #define PLANE_TIMEOUT_MS         45000
-#define API_FETCH_SEC            4
+#define API_FETCH_SEC            5
 
 #define SCREEN_WIDTH             1024
 #define SCREEN_HEIGHT            600

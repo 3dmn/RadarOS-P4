@@ -182,13 +182,7 @@ static void darken_and_blit_tile(const uint8_t *rgb, int tile_w, int tile_h, int
     uint16_t *dst = (uint16_t *)s_canvas_buf;
 
     for (int y = 0; y < tile_h; y++) {
-        // Tile grid placement (dst_y0, process_reload() below) is correct
-        // top-down - confirmed on the physical panel: the tile grid itself
-        // (N/S order) is right. But the pixel content *within* each tile
-        // (OSM labels/text) renders upside down with a direct row copy, so
-        // the source row is read back-to-front here. See the MAP RENDERING
-        // rule in CLAUDE.md.
-        int src_y = tile_h - 1 - y;
+        int src_y = y; // Direct top-to-bottom mapping (PNG row 0 is top/North)
         int canvas_y = dst_y0 + y;
         if (canvas_y < 0 || canvas_y >= MAP_SIZE) continue;
 
