@@ -33,7 +33,7 @@ RadarOS-P4 turns an **ESP32-P4** with a **7" MIPI-DSI touchscreen (1024×600)** 
 
 - **Live ADS-B Tracking** — real-time feed from [adsb.fi](https://adsb.fi) and [airplanes.live](https://airplanes.live), with a **dynamic query radius**: the request distance (in nautical miles) is derived from the HUD's currently selected range (e.g. 50 km → 27 NM, 100 km → 54 NM, 250 km → 135 NM) instead of a fixed worst-case radius, keeping API responses small and fast even over dense metro airspace.
 - **Interactive 7" Touch HUD (LVGL 9.5)** — 60 FPS vector rendering with concentric range rings, bearing compass, heading-oriented aircraft/helicopter icons, a persistent bottom-left status capsule (Wi-Fi, MQTT, and a pulsing amber **● FW** firmware-update indicator), and a darkened OpenStreetMap tile background rendered into a PSRAM canvas.
-- **Home Assistant & MQTT Discovery** — full auto-discovery on connect: **24 entities** (controls, sensors, and a dedicated `update` entity with changelog) appear under one device card with zero YAML. See [below](#home-assistant--mqtt-integration).
+- **Home Assistant & MQTT Discovery** — full auto-discovery on connect: **23 entities** (controls, sensors, and a dedicated `update` entity with changelog) appear under one device card with zero YAML. See [below](#home-assistant--mqtt-integration).
 - **Web Management Panel** — five-tab responsive dark/neon cockpit UI, JSON configuration export/import, a tab selection that survives a page refresh (URL hash + `localStorage`), and a built-in GitHub release checker with a one-tap download link.
 - **Dual-Language UI (i18n)** — every on-screen and web-panel string is available in **English** and **Polski**, switchable live from the touchscreen, the web panel, or Home Assistant.
 - **Optimized Memory Architecture** — the 32 MB external PSRAM hosts the ADS-B response buffer, the map tile canvas, and (via `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`/`CONFIG_MBEDTLS_DYNAMIC_BUFFER`) the mbedTLS session buffers, leaving the internal DMA-capable SRAM free for the ESP-Hosted Wi-Fi/SDIO driver. A global mutex further guarantees only one HTTPS/TLS session is ever open at a time across ADS-B polling, map tiles, and version checks, eliminating the `sdio_rx_get_buffer` memory crashes that concurrent TLS sessions used to cause.
@@ -107,7 +107,7 @@ All binary settings use animated iOS-style toggle switches, and every setting pe
 
 ## Home Assistant / MQTT Integration
 
-Enable MQTT on the **MQTT** tab, point it at your broker, and RadarOS-P4 publishes retained [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) config topics on connect — the station and all **24 entities** appear automatically under one device card, no YAML required.
+Enable MQTT on the **MQTT** tab, point it at your broker, and RadarOS-P4 publishes retained [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) config topics on connect — the station and all **23 entities** appear automatically under one device card, no YAML required.
 
 **Availability & reconnection:** a Last Will and Testament (`homeassistant/sensor/<node_id>/status/state`, `online`/`offline`) keeps every entity's availability accurate even on an unclean disconnect (Wi-Fi drop, power loss); the client reconnects to the broker automatically.
 
@@ -126,13 +126,12 @@ Enable MQTT on the **MQTT** tab, point it at your broker, and RadarOS-P4 publish
 | Flight Trail Length | `select` | Short / Medium / Long / Maximum |
 | Interface Language | `select` | English / Polski |
 | Restart Device | `button` | Reboots the ESP32-P4 |
-| Auto-Update | `switch` | Reserved for a future automatic-install feature — currently has no effect; updates are installed manually, see [Firmware Updates](#firmware-updates) |
 
 **Firmware update entity:**
 
 | Entity | Type | Reports |
 |---|---|---|
-| Firmware | `update` | `installed_version`, `latest_version`, `release_url`, `release_summary` (changelog from `version.json`). The built-in "Install" action is intentionally a no-op — installation is manual by design, see [Firmware Updates](#firmware-updates). |
+| Firmware | `update` | Reports `installed_version`, `latest_version`, `release_url`, and `release_summary` (the changelog from `version.json`) — a notification only, RadarOS-P4 never installs a release by itself. To update, download the `.bin` from `release_url` and flash it either through the web panel's **Flash Firmware** form (System tab) or over UART/USB. |
 
 **Sensors** (published on every change and every ~10 s):
 

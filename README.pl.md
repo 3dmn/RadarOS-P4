@@ -1,23 +1,26 @@
 📖 [English version (README.md)](README.md)
 
-# RadarOS P4 📡✈️
+# RadarOS-P4 📡✈️
 
-**Samodzielna stacja radaru lotniczego ADS-B na ESP32-P4 — HUD i panel WWW.**
+**Otwartoźródłowy radar lotniczy ADS-B i wyświetlacz ruchu lotniczego na żywo.**
 
-RadarOS P4 zamienia moduł ESP32-P4 z 7-calowym ekranem dotykowym w samodzielną konsolę radaru lotniczego: wektorowy HUD w 60 FPS, mapę kafelkową offline, globalną skategoryzowaną bazę lotnisk, zdjęcia statków powietrznych, oznaczanie ruchu wojskowego/ratunkowego, alarmy squawk awaryjnych oraz nowoczesny panel konfiguracyjny WWW z bezprzewodową aktualizacją firmware — bez aplikacji towarzyszącej, bez konta w chmurze, bez komputera po pierwszym wgraniu.
+RadarOS-P4 zamienia moduł **ESP32-P4** z **7-calowym ekranem dotykowym MIPI-DSI (1024×600)** w samodzielną, działającą w czasie rzeczywistym konsolę radaru lotniczego: wektorowy HUD w 60 FPS, renderowaną offline mapę kafelkową OpenStreetMap w tle, globalną skategoryzowaną bazę lotnisk, zdjęcia statków powietrznych, oznaczanie ruchu wojskowego/ratunkowego, alarmy squawk awaryjnych, pełną integrację z Home Assistant/MQTT oraz nowoczesny panel konfiguracyjny WWW — bez aplikacji towarzyszącej, bez konta w chmurze i bez komputera po pierwszym wgraniu firmware.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: ESP32-P4](https://img.shields.io/badge/Platform-ESP32--P4-blue.svg)](#sprzęt)
 [![Framework: ESP-IDF](https://img.shields.io/badge/Framework-ESP--IDF%20v5.3%2B-red.svg)](https://github.com/espressif/esp-idf)
-[![UI: LVGL 9](https://img.shields.io/badge/UI-LVGL%209-9cf.svg)](https://lvgl.io/)
+[![UI: LVGL 9](https://img.shields.io/badge/UI-LVGL%209.5-9cf.svg)](https://lvgl.io/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-MQTT%20Discovery-41BDF5.svg)](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)
+[![Version](https://img.shields.io/badge/firmware-v1.0.0-brightgreen.svg)](main/version.h)
 
 ---
 
 ## Spis treści
 
 - [Kluczowe funkcje](#kluczowe-funkcje)
-- [Sprzęt](#sprzęt)
-- [Szybki start](#szybki-start)
+- [Wymagania sprzętowe](#sprzęt)
+- [Kompilacja i wgrywanie](#kompilacja-i-wgrywanie)
+- [Aktualizacje oprogramowania](#aktualizacje-oprogramowania)
 - [Panel konfiguracyjny WWW](#panel-konfiguracyjny-www)
 - [Integracja Home Assistant / MQTT](#integracja-home-assistant--mqtt)
 - [Stan połączenia na ekranie](#stan-połączenia-na-ekranie)
@@ -28,16 +31,14 @@ RadarOS P4 zamienia moduł ESP32-P4 z 7-calowym ekranem dotykowym w samodzielną
 
 ## Kluczowe funkcje
 
-- **Kokpitowy HUD na 7-calowym ekranie dotykowym** — wektorowe renderowanie LVGL 9 w 60 FPS, okręgi zasięgu, kompas namiarowy, ikony statków/śmigłowców zorientowane wg kursu i płynne animacje.
-- **Dwutorowy silnik danych** — jednoczesna obsługa dekoderów ADS-B w czasie rzeczywistym oraz chmurowych źródeł Wi-Fi (adsb.fi / airplanes.live), dzięki czemu stacja działa zarówno jako klient sieciowy, jak i przy lokalnym sprzęcie dekodującym.
-- **Globalna skategoryzowana baza lotnisk** — setki lotnisk na całym świecie podzielonych na **komunikacyjne (Commercial Hubs)**, **bazy wojskowe (Military Air Bases)** oraz **aerokluby i lądowiska (General Aviation)**, każda kategoria niezależnie przełączalna i renderowana wyłącznie w aktywnym zasięgu radaru — dla pełnej wydajności 60 FPS.
+- **Śledzenie ruchu ADS-B na żywo** — dane w czasie rzeczywistym z [adsb.fi](https://adsb.fi) i [airplanes.live](https://airplanes.live), z **dynamicznym promieniem zapytania**: odległość zapytania (w milach morskich) jest wyliczana z aktualnie wybranego zasięgu HUD (np. 50 km → 27 NM, 100 km → 54 NM, 250 km → 135 NM) zamiast stałego, maksymalnego promienia — dzięki temu odpowiedzi API pozostają małe i szybkie nawet nad gęstymi aglomeracjami.
+- **Interaktywny HUD na 7-calowym ekranie dotykowym (LVGL 9.5)** — wektorowe renderowanie w 60 FPS z okręgami zasięgu, kompasem namiarowym, ikonami statków/śmigłowców zorientowanymi wg kursu, stałą kapsułą statusu w lewym dolnym rogu (Wi-Fi, MQTT oraz pulsująca bursztynowa dioda **● FW** sygnalizująca dostępną aktualizację) i przyciemnioną mapą OpenStreetMap renderowaną do bufora w pamięci PSRAM.
+- **Home Assistant i MQTT Discovery** — pełna autokonfiguracja po połączeniu: **23 encje** (sterujące, sensory oraz dedykowana encja `update` z opisem zmian) pojawiają się pod jedną kartą urządzenia, bez pisania YAML. Zobacz [poniżej](#integracja-home-assistant--mqtt).
+- **Panel zarządzania WWW** — responsywny, pięciozakładkowy interfejs w stylu kokpitu, eksport/import konfiguracji do JSON, zapamiętywanie otwartej zakładki po odświeżeniu strony (hash w adresie URL + `localStorage`) oraz wbudowany mechanizm sprawdzania wydań na GitHubie z bezpośrednim linkiem do pobrania.
+- **Dwujęzyczny interfejs (i18n)** — każdy tekst na ekranie i w panelu WWW dostępny jest w języku **angielskim** i **polskim**, przełączanym na żywo z ekranu dotykowego, panelu WWW lub Home Assistant.
+- **Zoptymalizowana architektura pamięci** — 32 MB zewnętrznej pamięci PSRAM przechowuje bufor odpowiedzi ADS-B, bufor mapy kafelkowej oraz (dzięki `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`/`CONFIG_MBEDTLS_DYNAMIC_BUFFER`) bufory sesji mbedTLS, pozostawiając wewnętrzną pamięć SRAM z dostępem DMA wyłącznie dla sterownika Wi-Fi ESP-Hosted. Dodatkowy globalny mutex gwarantuje, że w danej chwili otwarta jest tylko jedna sesja HTTPS/TLS — dla odpytywania ADS-B, kafelków mapy i sprawdzania wersji — co eliminuje awarie pamięci `sdio_rx_get_buffer` powodowane wcześniej przez równoległe sesje TLS.
+- **Globalna skategoryzowana baza lotnisk** — setki lotnisk na całym świecie podzielonych na **komunikacyjne (Commercial Hubs)**, **bazy wojskowe (Military Air Bases)** oraz **aerokluby i lądowiska (General Aviation)**, każda kategoria niezależnie przełączalna i renderowana wyłącznie w aktywnym zasięgu radaru.
 - **Alarmy squawk awaryjnych** — natychmiastowy, pulsujący baner na całą szerokość HUD-u przy kodach transpondera **7700** (Emergency), **7600** (Awaria radia) i **7500** (Porwanie).
-- **Integracja Home Assistant / MQTT** — pełna dwukierunkowa kontrola stacji z Home Assistant przez MQTT Discovery: 11 automatycznie wykrywanych encji sterujących (jasność, zasięg, filtr ruchu, ruch naziemny, mapa, baner squawk, warstwa lotnisk + przełączniki per kategoria, długość śladu lotu, język, zdalny restart) oraz 8 encji telemetrii/bezpieczeństwa na żywo (liczba samolotów, alarm squawk i jego szczegóły, flaga aktywności wojskowej, najbliższy samolot, RSSI Wi-Fi, uptime, wolna pamięć). Zobacz [poniżej](#integracja-home-assistant--mqtt).
-- **Nowoczesny panel WWW z zakładkami** — responsywny ciemny interfejs w stylu kokpitu lotniczego w pięciu zakładkach (Radar i wyświetlacz · Lokalizacja · Sieć Wi-Fi · System · MQTT) z animowanymi przełącznikami w stylu iOS, automatycznym wykrywaniem trybu AP (domyślna zakładka Wi-Fi, gdy urządzenie serwuje własny punkt dostępowy) oraz odpytywaną na żywo diodą statusu MQTT.
-- **Interaktywny kwadratowy selektor lokalizacji** — mapa Leaflet o proporcjach dokładnie 1:1 do wskazania współrzędnych GPS stacji jednym dotknięciem.
-- **Kopia zapasowa i przywracanie konfiguracji JSON** — eksport jednym kliknięciem wszystkich ustawień z NVS (bez danych logowania Wi-Fi/MQTT) do pliku `radar_config.json` oraz import przywracający lub klonujący konfigurację stacji.
-- **Bezprzewodowa aktualizacja firmware (Web OTA)** — układ dwóch 8 MB partycji OTA i wgrywanie firmware wprost z przeglądarki (wybierz plik `.bin`, obserwuj pasek postępu, automatyczny restart), z walidacją magic byte obrazu i zapisem w kawałkach bezpiecznym dla watchdoga.
-- **Stan połączenia na ekranie** — animowane dymki powiadomień dla zmian stanu Wi-Fi (AP/łączenie/połączono) i MQTT (łączenie/połączono/błąd) oraz stała dioda statusu HUD z efektem pulsowania/oddychania. Zobacz [poniżej](#stan-połączenia-na-ekranie).
 - **Bogata telemetria celów** — sanityzowane callsigny, automatyczne oznaczanie `[MIL]` ruchu wojskowego NATO/sojuszniczego, strzałki trendu wysokości (▲/▼), prędkość względem ziemi, kurs oraz kolorowane ślady lotu o konfigurowalnej długości historii.
 - **Interaktywne okienka statków i 3-stopniowy silnik zdjęć** — dotknięcie dowolnego celu pokazuje pełne parametry lotu wraz z prawdziwym zdjęciem egzemplarza (Planespotters / Airport-Data) lub zdjęciem poglądowym z Wikipedii dla danego typu.
 
@@ -45,46 +46,52 @@ RadarOS P4 zamienia moduł ESP32-P4 z 7-calowym ekranem dotykowym w samodzielną
 
 | Element | Specyfikacja |
 |---|---|
-| MCU | Espressif **ESP32-P4** — dwurdzeniowy RISC-V @ 400 MHz, z pamięcią PSRAM |
-| Wyświetlacz | **7-calowy ekran dotykowy IPS**, DSI, 1024×600 |
-| Łączność | Koprocesor ESP32-C6 / ESP-Hosted SDIO Wi-Fi 6 |
+| Płytka | **Waveshare ESP32-P4-WIFI6-Touch-LCD-7B** (lub zgodna płytka ESP32-P4 z tym samym okablowaniem ekranu i Wi-Fi) |
+| MCU | Espressif **ESP32-P4** — dwurdzeniowy RISC-V @ 400 MHz |
+| Pamięć | **32 MB zewnętrznej pamięci PSRAM** (wymagana — przechowuje bufory sieciowe, mapę kafelkową i sesje mbedTLS) |
+| Wyświetlacz | **7-calowy ekran dotykowy IPS**, MIPI DSI, **1024×600**, sterownik panelu EK79007 |
+| Dotyk | Kontroler pojemnościowy **GT911** |
+| Łączność | Koprocesor **ESP32-C6 przez ESP-Hosted**, magistrala SDIO, **4-bit, 40 MHz** |
 | Pojemność floty | Do 200 jednoczesnych celów |
 | Historia śladu lotu | Do 120 punktów na samolot |
 | Framework firmware | ESP-IDF ≥ 5.3, LVGL 9.5 |
 
-## Szybki start
+## Kompilacja i wgrywanie
 
-### 1. Klonowanie repozytorium i konfiguracja ESP-IDF
+Wymagane jest **ESP-IDF v5.3.5+** ze wsparciem dla targetu `esp32p4`, poprawnie wczytane do środowiska (`. $IDF_PATH/export.sh` / `export.bat`).
 
 ```bash
 git clone <adres-repozytorium>
 cd radar-adsb-i-ikony
+
 idf.py set-target esp32p4
-```
-
-Wymagane jest **ESP-IDF v5.3+** ze wsparciem dla targetu `esp32p4`.
-
-### 2. Pierwsze wgranie przez kabel USB
-
-RadarOS P4 korzysta z **tablicy partycji z dwoma 8 MB slotami OTA**. Pierwsze wgranie musi zostać wykonane przez kabel USB, aby bootloader i oba sloty OTA zostały poprawnie zapisane:
-
-```bash
+idf.py build
 idf.py -p COMx flash monitor
 ```
 
-### 3. Konfiguracja stacji
+RadarOS-P4 korzysta z **tablicy partycji z dwoma 8 MB slotami OTA** (`partitions.csv`). Pierwsze wgranie musi zostać wykonane przez kabel USB, aby bootloader i oba sloty OTA zostały poprawnie zapisane; każda kolejna aktualizacja może odbyć się bezprzewodowo — zobacz [Aktualizacje oprogramowania](#aktualizacje-oprogramowania).
+
+### Pierwsza konfiguracja
 
 Przy pierwszym uruchomieniu (lub gdy brak zapisanej sieci Wi-Fi) urządzenie uruchamia własny punkt dostępowy konfiguracyjny:
 
-- Połącz się z siecią Wi-Fi **`RadarADSB-Setup`**.
-- Otwórz w przeglądarce **`http://192.168.4.1`** — panel otwiera się od razu na zakładce **Sieć Wi-Fi**.
-- Zeskanuj i wybierz swoją domową sieć, ustaw współrzędne GPS stacji (dotknięciem na kwadratowej mapie) i zapisz. Urządzenie zrestartuje się i dołączy do lokalnej sieci.
+1. Połącz się z siecią Wi-Fi **`RadarADSB-Setup`**.
+2. Otwórz w przeglądarce **`http://192.168.4.1`** — panel otwiera się od razu na zakładce **Sieć Wi-Fi**.
+3. Zeskanuj i wybierz swoją domową sieć, ustaw współrzędne GPS stacji (dotknięciem na kwadratowej mapie) i zapisz. Urządzenie zrestartuje się i dołączy do lokalnej sieci.
 
 Po połączeniu ten sam panel jest dostępny pod adresem IP stacji w sieci lokalnej do codziennej konfiguracji.
 
-### 4. Kolejne aktualizacje — bezprzewodowo
+## Aktualizacje oprogramowania
 
-Do każdej kolejnej aktualizacji firmware kabel nie jest już potrzebny: otwórz zakładkę **System** w panelu WWW, wybierz nowy plik `.bin` w sekcji **Aktualizacja oprogramowania (OTA)** i kliknij **Aktualizuj**. Urządzenie wgrywa firmware na nieaktywną partycję OTA i restartuje się automatycznie.
+RadarOS-P4 korzysta z lekkiego mechanizmu **wyłącznie powiadomień** — urządzenie nigdy samodzielnie nie pobiera ani nie instaluje nowego obrazu firmware:
+
+- Zadanie w tle pobiera niewielki manifest `version.json` (`{"version", "url", "notes"}`) mniej więcej co 4 godziny, a dodatkowo raz ~20 s po połączeniu z Wi-Fi. Adres manifestu domyślnie wskazuje na plik [`version.json`](version.json) w gałęzi `main` tego repozytorium i może zostać nadpisany indywidualnie dla urządzenia w panelu WWW.
+- Ręczne sprawdzenie można w każdej chwili wywołać przyciskiem **Check for Updates Now** w zakładce **System**, bez przeładowania strony.
+- Gdy opublikowana zostanie nowsza wersja, stacja sygnalizuje to jednocześnie w trzech miejscach:
+  - **Na 7-calowym HUD** — w kapsule statusu pojawia się pulsująca bursztynowa dioda **● FW**; dotknięcie jej pokazuje w dymku numer nowej wersji i notatkę o wydaniu.
+  - **W Home Assistant** — encja `update.firmware` raportuje `installed_version`/`latest_version`/`release_url`/`release_summary`.
+  - **W panelu WWW** — zakładka **System** wyświetla przycisk **📦 Download Firmware v*X.Y.Z* (.bin)**, prowadzący bezpośrednio do pliku wydania na GitHubie.
+- Aby zainstalować aktualizację: pobierz plik `.bin` z powyższego linku na komputer lub telefon, a następnie wgraj go w sekcji **Firmware Update (OTA)** na zakładce **System** i kliknij **Flash Firmware**. Przeglądarkowy flasher zapisuje plik bezpośrednio na nieaktywnej partycji OTA (z walidacją magic byte i zapisem w kawałkach bezpiecznym dla watchdoga) i po sukcesie automatycznie restartuje urządzenie — bez kabla, bez narzędzia szeregowego.
 
 ## Panel konfiguracyjny WWW
 
@@ -93,14 +100,14 @@ Do każdej kolejnej aktualizacji firmware kabel nie jest już potrzebny: otwórz
 | **Radar i wyświetlacz** | Jasność ekranu, domyślny zasięg, limit celów, filtr ruchu (ALL/CIVIL/MIL), ruch naziemny, mapa w tle, baner alarmu squawk, warstwa lotnisk + przełączniki per kategoria (Komercyjne/Wojskowe/Aerokluby), długość śladu lotu. |
 | **Lokalizacja** | Szerokość/długość geograficzna stacji z interaktywnym kwadratowym (1:1) selektorem mapy. |
 | **Sieć Wi-Fi** | SSID/hasło, skaner sieci, aktualny status połączenia i adres IP. |
-| **System** | Język (English/Polski), nazwa stacji, wersja firmware, kopia zapasowa/przywracanie konfiguracji JSON, aktualizacja firmware przez Web OTA. |
+| **System** | Język (English/Polski), nazwa stacji, wersja firmware, kopia zapasowa/przywracanie konfiguracji JSON, ręczne wgrywanie pliku w sekcji **Firmware Update (OTA)** oraz sekcja **Firmware Update Check** (adres URL sprawdzania wersji, przycisk Check for Updates Now, link do pobrania z GitHuba). |
 | **MQTT** | Włączenie MQTT, host/port/login/hasło brokera, prefiks topików (node ID Home Assistant), przełącznik Home Assistant Auto-Discovery oraz odpytywana na żywo dioda statusu połączenia. |
 
-Wszystkie ustawienia binarne używają animowanych przełączników w stylu iOS. Każde ustawienie jest trwale zapisywane w NVS i przetrwa restart; stała stopka na dole formularza pokazuje aktualną wersję firmware na każdej zakładce.
+Wszystkie ustawienia binarne używają animowanych przełączników w stylu iOS, a każde ustawienie jest trwale zapisywane w NVS i przetrwa restart. Aktualnie otwarta zakładka jest zapamiętywana po odświeżeniu strony lub po „Save & Reboot” dzięki hashowi w adresie URL i `localStorage`, więc panel nigdy nie wraca do pierwszej zakładki.
 
 ## Integracja Home Assistant / MQTT
 
-Włącz MQTT w zakładce **MQTT**, wskaż swojego brokera, a RadarOS P4 opublikuje trwałe (retained) topiki konfiguracyjne [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) zaraz po połączeniu — stacja i wszystkie jej encje pojawią się automatycznie pod jedną kartą urządzenia, bez potrzeby pisania YAML.
+Włącz MQTT w zakładce **MQTT**, wskaż swojego brokera, a RadarOS-P4 opublikuje trwałe (retained) topiki konfiguracyjne [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) zaraz po połączeniu — stacja i wszystkie **23 encje** pojawią się automatycznie pod jedną kartą urządzenia, bez potrzeby pisania YAML.
 
 **Dostępność i ponowne łączenie:** Last Will and Testament (`homeassistant/sensor/<node_id>/status/state`, `online`/`offline`) utrzymuje poprawny status dostępności każdej encji nawet przy nagłym rozłączeniu (zanik Wi-Fi, utrata zasilania); klient łączy się z brokerem ponownie automatycznie.
 
@@ -120,6 +127,12 @@ Włącz MQTT w zakładce **MQTT**, wskaż swojego brokera, a RadarOS P4 opubliku
 | Język interfejsu | `select` | English / Polski |
 | Restart urządzenia | `button` | Restartuje ESP32-P4 |
 
+**Encja aktualizacji firmware:**
+
+| Encja | Typ | Raportuje |
+|---|---|---|
+| Firmware | `update` | Raportuje `installed_version`, `latest_version`, `release_url` oraz `release_summary` (opis zmian z `version.json`) — to wyłącznie powiadomienie, RadarOS-P4 nigdy nie instaluje wydania samodzielnie. Aby zaktualizować, pobierz plik `.bin` spod adresu `release_url` i wgraj go przez formularz **Flash Firmware** w panelu WWW (zakładka System) lub przez UART/USB. |
+
 **Sensory** (publikowane przy każdej zmianie oraz co ~10 s):
 
 | Encja | Opis |
@@ -128,6 +141,7 @@ Włącz MQTT w zakładce **MQTT**, wskaż swojego brokera, a RadarOS P4 opubliku
 | Alarm Squawk | Sensor binarny, `ON` gdy aktywny kod 7700/7600/7500 |
 | Szczegóły alarmu | Callsign, kod squawk i typ alarmu |
 | Aktywność wojskowa | Sensor binarny dla pobliskiego ruchu wojskowego |
+| Dostępna aktualizacja | Sensor binarny, `ON` gdy `version.json` wskazuje nowsze wydanie |
 | Najbliższy samolot | Callsign z atrybutami typu/dystansu/wysokości |
 | Sygnał Wi-Fi | RSSI w dBm |
 | Czas działania | Sekundy od uruchomienia |
@@ -142,7 +156,13 @@ Dwa półprzezroczyste, zaokrąglone dymki powiadomień (ciemne tło, neonowo-zi
 - **Dymek Wi-Fi** — pokazuje SSID/hasło/adres URL SoftAP w trybie konfiguracji (trwale), komunikat „Łączenie z Wi-Fi…” podczas dołączania do zapisanej sieci oraz zielony komunikat „Połączono! IP: …”, który znika automatycznie po ~3,5 s.
 - **Dymek MQTT** — analogicznie dla połączenia z brokerem (turkusowe „Łączenie…”, zielone „Połączono!” znikające po ~3,5 s, bursztynowo-czerwone „Błąd połączenia / ponawianie…” znikające po ~5 s); widoczny tylko, gdy MQTT jest włączone, i wyciszany podczas zaniku Wi-Fi, aby uniknąć powielania alarmu.
 
-Stała **dioda statusu HUD** w lewym dolnym rogu radaru (zastępująca dawny wskaźnik zasięgu — zasięg jest już widoczny na przycisku `RNG` i na okręgach radaru) pokazuje małe pulsujące/oddychające diody LED: zielona i wolna przy połączeniu, żółta i szybka podczas łączenia, czerwona i migająca przy błędzie — jedna dla Wi-Fi i druga dla MQTT, widoczna tylko, gdy MQTT jest włączone.
+Stała **dioda statusu HUD** w lewym dolnym rogu radaru pokazuje małe pulsujące/oddychające diody LED — po jednej na każdy podsystem: zielona i wolna przy połączeniu, żółta i szybka podczas łączenia, czerwona i migająca przy błędzie.
+
+| Wskaźnik | Znaczenie |
+|---|---|
+| ● WIFI | Stan połączenia Wi-Fi (widoczny zawsze) |
+| ● MQTT | Stan połączenia z brokerem (widoczny tylko, gdy MQTT jest włączone) |
+| ● FW | Domyślnie ukryty; pojawia się i pulsuje na bursztynowo, gdy `version.json` wskazuje nowsze wydanie firmware. Dotknięcie pokazuje dymek z numerem wersji i notatką o wydaniu. |
 
 ## Źródła danych
 
@@ -152,6 +172,6 @@ Stała **dioda statusu HUD** w lewym dolnym rogu radaru (zastępująca dawny wsk
 
 ## Nota prawna i licencja
 
-RadarOS P4 jest **projektem hobbystycznym, open source i edukacyjnym**. Powstał z myślą o entuzjastach chcących wizualizować publicznie nadawany ruch ADS-B i **nie jest certyfikowany ani przeznaczony do użytku w kontroli ruchu lotniczego, planowaniu lotów, separacji ani jakichkolwiek innych decyzjach operacyjnych związanych z bezpieczeństwem lotów**. W rzeczywistych operacjach lotniczych zawsze należy korzystać z oficjalnych, certyfikowanych źródeł danych.
+RadarOS-P4 jest **projektem hobbystycznym, open source i edukacyjnym**. Powstał z myślą o entuzjastach chcących wizualizować publicznie nadawany ruch ADS-B i **nie jest certyfikowany ani przeznaczony do użytku w kontroli ruchu lotniczego, planowaniu lotów, separacji ani jakichkolwiek innych decyzjach operacyjnych związanych z bezpieczeństwem lotów**. W rzeczywistych operacjach lotniczych zawsze należy korzystać z oficjalnych, certyfikowanych źródeł danych.
 
 Projekt jest udostępniany na licencji [MIT](LICENSE).
