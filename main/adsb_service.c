@@ -34,8 +34,23 @@ int total_aircraft_in_zone = 0;
 // How many polling cycles (each API_FETCH_SEC seconds) between memory telemetry logs.
 #define MEM_TELEMETRY_EVERY_N_CYCLES  15
 
+// adsb.fi/airplanes.live both reject requests with no User-Agent (HTTP 403).
+#define ADSB_USER_AGENT "RadarOS-P4/1.1 (+https://github.com/vmisiek/RadarOS-P4)"
+
 uint32_t get_time_ms(void) {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+// Converts the current HUD range to a query radius in nautical miles (both
+// APIs take "dist" in NM) - querying only as far as the radar actually
+// displays keeps the JSON response (and the PSRAM parse buffer) small even
+// over dense metro areas, instead of always requesting a fixed 140 NM.
+// Clamped to a sane minimum/maximum regardless of the configured range.
+static uint32_t compute_dist_nm(float range_km) {
+    uint32_t nm = (uint32_t)ceilf(range_km * 0.539957f);
+    if (nm < 5) nm = 5;
+    if (nm > 150) nm = 150;
+    return nm;
 }
 
 void calculate_coords(float lat, float lon, float *out_dist_km, float *out_bearing_deg) {
@@ -362,22 +377,26 @@ static void adsb_worker_task(void *pvParameters) {
     }
 
     static const char *api_hosts[] = {
-        "https://opendata.adsb.fi/api/v2/lat/%.4f/lon/%.4f/dist/140",
-        "https://api.airplanes.live/v2/point/%.4f/%.4f/140"
+        "https://opendata.adsb.fi/api/v2/lat/%.4f/lon/%.4f/dist/%u",
+        "https://api.airplanes.live/v2/point/%.4f/%.4f/%u"
     };
     int host_idx = 0;
     int cycle_count = 0;
 
     char url[160];
-    snprintf(url, sizeof(url), api_hosts[host_idx], g_radar_lat, g_radar_lon);
+    snprintf(url, sizeof(url), api_hosts[host_idx], g_radar_lat, g_radar_lon, compute_dist_nm(radar_ui_get_range_km()));
 
     esp_http_client_config_t config = {
         .url = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 9000,
+        .timeout_ms = 12000,
         .buffer_size = 8192,
         .buffer_size_tx = 1024,
-        .user_agent = "ADSBRadarViewer/1.0",
+        .user_agent = ADSB_USER_AGENT,
+        // Keeps the TCP/TLS session open between cycles when the API host
+        // stays the same, avoiding a full mbedTLS handshake (and its
+        // internal DMA-capable RAM allocation) every API_FETCH_SEC seconds.
+        .keep_alive_enable = true,
     };
     // The HTTP client handle is created once and reused for the task's whole
     // lifetime (only esp_http_client_set_url() between cycles) - this avoids
@@ -390,59 +409,75 @@ static void adsb_worker_task(void *pvParameters) {
         vTaskDelete(NULL);
         return;
     }
+    // airplanes.live rejects requests with no User-Agent (HTTP 403) - set it
+    // explicitly on top of config.user_agent above, since it must survive
+    // across esp_http_client_set_url() calls on this reused handle.
+    esp_http_client_set_header(client, "User-Agent", ADSB_USER_AGENT);
+    esp_http_client_set_header(client, "Accept", "application/json");
 
     while (1) {
-        snprintf(url, sizeof(url), api_hosts[host_idx], g_radar_lat, g_radar_lon);
+        // Recomputed every cycle - the user can change the HUD range live,
+        // and a query radius wider than what is actually displayed only
+        // wastes bandwidth/PSRAM on aircraft that never get drawn.
+        uint32_t dist_nm = compute_dist_nm(radar_ui_get_range_km());
+        snprintf(url, sizeof(url), api_hosts[host_idx], g_radar_lat, g_radar_lon, dist_nm);
         esp_http_client_set_url(client, url);
 
+        // g_https_mutex serializes this against map_tile_service.c's TLS
+        // fetches - see the comment on g_https_mutex in wifi_manager.h.
+        xSemaphoreTake(g_https_mutex, portMAX_DELAY);
         esp_err_t err = esp_http_client_open(client, 0);
+        int status = 0;
+        int total_read = 0;
 
         if (err == ESP_OK) {
             esp_http_client_fetch_headers(client);
-            int status = esp_http_client_get_status_code(client);
+            status = esp_http_client_get_status_code(client);
 
             if (status == 200) {
-                int total_read = 0;
                 int read_len = 0;
-
                 while ((read_len = esp_http_client_read(client, resp_buf + total_read, HTTP_BUFFER_SIZE - total_read - 1)) > 0) {
                     total_read += read_len;
                 }
                 resp_buf[total_read] = '\0';
-                esp_http_client_close(client);
-
-                if (total_read >= HTTP_BUFFER_SIZE - 1) {
-                    ESP_LOGW(TAG, "HTTP buffer (%d B) full - API response may have been truncated", HTTP_BUFFER_SIZE);
-                }
-
-                if (total_read > 200) {
-                    int max_planes = wifi_mgr_get_max_aircraft();
-                    if (max_planes > MAX_AIRCRAFT_CAPACITY) max_planes = MAX_AIRCRAFT_CAPACITY;
-
-                    memset(temp_fleet, 0, sizeof(AircraftData) * MAX_AIRCRAFT_CAPACITY);
-                    int parsed = parse_adsb_json(resp_buf, temp_fleet, max_planes);
-
-                    if (parsed > 0 && adsb_service_lock(100)) {
-                        total_aircraft_in_zone = parsed;
-                        for (int i = 0; i < MAX_AIRCRAFT_CAPACITY; i++) {
-                            if (i < parsed) live_fleet[i] = temp_fleet[i];
-                            else live_fleet[i].active = false;
-                        }
-                        adsb_service_unlock();
-                        ESP_LOGI(TAG, "Fetched %d aircraft from %s", parsed, url);
-
-                        radar_ui_refresh();
-                    }
-                } else {
-                    host_idx = (host_idx + 1) % 2;
-                }
+                // Connection intentionally left open for keep-alive reuse on
+                // the next cycle (see .keep_alive_enable above).
             } else {
                 ESP_LOGW(TAG, "HTTP response %d from ADS-B API (%s)", status, url);
                 esp_http_client_close(client);
-                host_idx = (host_idx + 1) % 2;
             }
         } else {
             ESP_LOGW(TAG, "ADS-B HTTPS request failed: %s", esp_err_to_name(err));
+        }
+        xSemaphoreGive(g_https_mutex);
+
+        if (err == ESP_OK && status == 200) {
+            if (total_read >= HTTP_BUFFER_SIZE - 1) {
+                ESP_LOGW(TAG, "HTTP buffer (%d B) full - API response may have been truncated", HTTP_BUFFER_SIZE);
+            }
+
+            if (total_read > 200) {
+                int max_planes = wifi_mgr_get_max_aircraft();
+                if (max_planes > MAX_AIRCRAFT_CAPACITY) max_planes = MAX_AIRCRAFT_CAPACITY;
+
+                memset(temp_fleet, 0, sizeof(AircraftData) * MAX_AIRCRAFT_CAPACITY);
+                int parsed = parse_adsb_json(resp_buf, temp_fleet, max_planes);
+
+                if (parsed > 0 && adsb_service_lock(100)) {
+                    total_aircraft_in_zone = parsed;
+                    for (int i = 0; i < MAX_AIRCRAFT_CAPACITY; i++) {
+                        if (i < parsed) live_fleet[i] = temp_fleet[i];
+                        else live_fleet[i].active = false;
+                    }
+                    adsb_service_unlock();
+                    ESP_LOGI(TAG, "Fetched %d aircraft from %s", parsed, url);
+
+                    radar_ui_refresh();
+                }
+            } else {
+                host_idx = (host_idx + 1) % 2;
+            }
+        } else {
             host_idx = (host_idx + 1) % 2;
         }
 

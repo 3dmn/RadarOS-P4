@@ -4,6 +4,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "esp_log.h"
 #include "esp_system.h"
@@ -74,7 +75,10 @@ static bool http_get_to_buffer(const char *url, uint8_t *buf, int buf_size, int 
     if (!client) return false;
     esp_http_client_set_header(client, "User-Agent", OTA_HTTP_USER_AGENT);
 
+    // g_https_mutex serializes this against adsb_service.c/map_tile_service.c
+    // TLS fetches - see the comment on g_https_mutex in wifi_manager.h.
     bool ok = false;
+    xSemaphoreTake(g_https_mutex, portMAX_DELAY);
     esp_err_t err = esp_http_client_open(client, 0);
     if (err == ESP_OK) {
         esp_http_client_fetch_headers(client);
@@ -95,17 +99,16 @@ static bool http_get_to_buffer(const char *url, uint8_t *buf, int buf_size, int 
     } else {
         ESP_LOGW(TAG, "Version manifest request failed: %s (%s)", esp_err_to_name(err), url);
     }
+    xSemaphoreGive(g_https_mutex);
     esp_http_client_cleanup(client);
     return ok;
 }
 
-// Fetches the version.json manifest at g_ota_version_url ({"version":...,
-// "url":...,"notes":...}) and updates s_latest_version/s_asset_url/
-// s_release_notes/s_update_available. No-op if no URL is configured.
+// Fetches the version.json manifest at ota_update_get_manifest_url()
+// ({"version":...,"url":...,"notes":...}) and updates s_latest_version/
+// s_asset_url/s_release_notes/s_update_available.
 static void perform_version_check(void) {
-    if (g_ota_version_url[0] == '\0') {
-        return;
-    }
+    const char *manifest_url = ota_update_get_manifest_url();
 
     uint8_t *buf = heap_caps_malloc(OTA_MANIFEST_BUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!buf) {
@@ -114,7 +117,7 @@ static void perform_version_check(void) {
     }
 
     int len = 0;
-    bool ok = http_get_to_buffer(g_ota_version_url, buf, OTA_MANIFEST_BUF_SIZE, &len);
+    bool ok = http_get_to_buffer(manifest_url, buf, OTA_MANIFEST_BUF_SIZE, &len);
     if (!ok) {
         heap_caps_free(buf);
         return;
@@ -157,7 +160,7 @@ static void perform_version_check(void) {
         ESP_LOGW(TAG, "Newer version found but the manifest has no 'url' field - auto-update unavailable");
     }
 
-    radar_ui_update_fw_status(newer, s_latest_version);
+    radar_ui_update_fw_status(newer, s_latest_version, s_release_notes);
 }
 
 // ================= DOWNLOAD & FLASH =================
@@ -184,8 +187,14 @@ static bool download_and_flash_firmware(const char *url) {
         .http_config = &http_config,
     };
 
+    // Held for the whole download (not just the handshake) - this is the
+    // single largest, longest-running HTTPS transfer in the app, so it must
+    // not run alongside any other TLS session. See g_https_mutex in
+    // wifi_manager.h.
     ESP_LOGI(TAG, "Starting firmware download via esp_https_ota from %s", url);
+    xSemaphoreTake(g_https_mutex, portMAX_DELAY);
     esp_err_t err = esp_https_ota(&ota_config);
+    xSemaphoreGive(g_https_mutex);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_https_ota failed: %s", esp_err_to_name(err));
         return false;
@@ -221,13 +230,6 @@ static void ota_check_task(void *arg) {
     }
 }
 
-static void check_now_task(void *arg) {
-    (void)arg;
-    perform_version_check();
-    maybe_auto_install_if_enabled();
-    vTaskDelete(NULL);
-}
-
 static void install_now_task(void *arg) {
     (void)arg;
     if (!s_asset_url[0]) {
@@ -255,11 +257,25 @@ void ota_update_service_start(void) {
 }
 
 void ota_update_check_now(void) {
-    xTaskCreatePinnedToCore(check_now_task, "ota_check_now", 8192, NULL, 3, NULL, 1);
+    // Auto-Update is intentionally not triggered here - this call runs on
+    // the caller's own task (typically an httpd worker), and a firmware
+    // download + reboot there would abandon the in-flight HTTP response.
+    // The periodic background task in ota_check_task() is the only path
+    // that installs automatically.
+    perform_version_check();
 }
 
 void ota_update_install_now(void) {
     xTaskCreatePinnedToCore(install_now_task, "ota_install_now", 8192, NULL, 4, NULL, 1);
+}
+
+bool ota_update_install_now_sync(void) {
+    if (!s_asset_url[0]) {
+        ESP_LOGW(TAG, "Install requested but no firmware asset URL is known yet");
+        return false;
+    }
+    ESP_LOGI(TAG, "Web panel install requested, downloading firmware from %s", s_asset_url);
+    return download_and_flash_firmware(s_asset_url);
 }
 
 bool ota_update_is_available(void) {
@@ -280,4 +296,8 @@ const char *ota_update_get_release_url(void) {
 
 const char *ota_update_get_release_notes(void) {
     return s_release_notes;
+}
+
+const char *ota_update_get_manifest_url(void) {
+    return g_ota_version_url[0] ? g_ota_version_url : DEFAULT_OTA_MANIFEST_URL;
 }

@@ -34,7 +34,7 @@ bool is_helicopter(const char *type);
 #define DEG_TO_RAD               0.017453292519943295f
 #define RAD_TO_DEG               57.29577951308232f
 
-#define HTTP_BUFFER_SIZE         (128 * 1024)
+#define HTTP_BUFFER_SIZE         (256 * 1024)
 // ===============================================================
 
 typedef enum {

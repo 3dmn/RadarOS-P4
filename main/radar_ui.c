@@ -174,14 +174,17 @@ static wifi_status_t s_wifi_led_status = WIFI_STATUS_CONNECTING;
 static bool s_mqtt_led_enabled = false;
 static mqtt_conn_status_t s_mqtt_led_status = MQTT_STATUS_DISABLED;
 
-// Firmware update indicator - third badge chip, hidden unless
-// ota_update_service.c has found a newer release.
-static lv_obj_t *fw_update_icon;
+// Firmware update indicator - third badge chip (dot + "FW" label, built the
+// same way as wifi_led/mqtt_led above), hidden unless ota_update_service.c
+// has found a newer release.
+static lv_obj_t *fw_led;
+static lv_obj_t *fw_led_label;
 static lv_obj_t *fw_update_toast;
 static lv_obj_t *fw_update_toast_label;
 static lv_timer_t *fw_update_toast_timer = NULL;
 static bool s_fw_update_available = false;
 static char s_fw_update_version[16] = "";
+static char s_fw_update_notes[128] = "";
 
 // Emergency squawk code priority: 7500 (hijack) > 7700 (general emergency) >
 // 7600 (radio failure). Returns 0 when the code is not an emergency.
@@ -1142,12 +1145,14 @@ static void apply_status_badge(void) {
     }
 
     if (!s_fw_update_available) {
-        stop_led_pulse(fw_update_icon);
-        lv_obj_add_flag(fw_update_icon, LV_OBJ_FLAG_HIDDEN);
+        stop_led_pulse(fw_led);
+        lv_obj_add_flag(fw_led, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(fw_led_label, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_clear_flag(fw_update_icon, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_text_color(fw_update_icon, lv_color_hex(0xf59e0b), 0);
-        start_led_pulse(fw_update_icon, 900, LV_OPA_50, LV_OPA_COVER);
+        lv_obj_clear_flag(fw_led, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(fw_led_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_color(fw_led, lv_color_hex(0xf59e0b), 0);
+        start_led_pulse(fw_led, 900, LV_OPA_50, LV_OPA_COVER);
     }
 
     bsp_display_unlock();
@@ -1170,9 +1175,9 @@ static void fw_update_toast_hide_timer_cb(lv_timer_t *timer) {
     fw_update_toast_timer = NULL;
 }
 
-// Tapping the (pulsing) update icon shows a brief toast with the new
-// version number, auto-hiding after 3s.
-static void fw_update_icon_click_cb(lv_event_t *e) {
+// Tapping the (pulsing) dot or "FW" label shows a brief toast with the new
+// version number and release notes (when known), auto-hiding after 3s.
+static void fw_led_click_cb(lv_event_t *e) {
     (void)e;
     if (!s_fw_update_available) return;
 
@@ -1181,17 +1186,27 @@ static void fw_update_icon_click_cb(lv_event_t *e) {
         lv_timer_del(fw_update_toast_timer);
         fw_update_toast_timer = NULL;
     }
-    lv_label_set_text_fmt(fw_update_toast_label, T(STR_FW_UPDATE_TOAST_FMT), s_fw_update_version);
+    char toast_text[192];
+    int n = snprintf(toast_text, sizeof(toast_text), T(STR_FW_UPDATE_TOAST_FMT), s_fw_update_version);
+    if (s_fw_update_notes[0] && n > 0 && (size_t)n < sizeof(toast_text)) {
+        snprintf(toast_text + n, sizeof(toast_text) - (size_t)n, "\n%s", s_fw_update_notes);
+    }
+    lv_label_set_text(fw_update_toast_label, toast_text);
     lv_obj_clear_flag(fw_update_toast, LV_OBJ_FLAG_HIDDEN);
     fw_update_toast_timer = lv_timer_create(fw_update_toast_hide_timer_cb, 3000, NULL);
     lv_timer_set_repeat_count(fw_update_toast_timer, 1);
     bsp_display_unlock();
 }
 
-void radar_ui_update_fw_status(bool available, const char *latest_version) {
+void radar_ui_update_fw_status(bool available, const char *latest_version, const char *release_notes) {
     s_fw_update_available = available;
     if (available && latest_version) {
         snprintf(s_fw_update_version, sizeof(s_fw_update_version), "%s", latest_version);
+    }
+    if (available && release_notes) {
+        snprintf(s_fw_update_notes, sizeof(s_fw_update_notes), "%s", release_notes);
+    } else if (!available) {
+        s_fw_update_notes[0] = '\0';
     }
     apply_status_badge();
 }
@@ -1339,14 +1354,28 @@ void radar_ui_build(void) {
     lv_obj_set_style_text_color(mqtt_led_label, lv_color_hex(0x8b949e), 0);
     lv_obj_add_flag(mqtt_led_label, LV_OBJ_FLAG_HIDDEN);
 
-    // Firmware update indicator - hidden unless ota_update_service.c has
+    // Firmware update indicator - built exactly like wifi_led/mqtt_led above
+    // (dot + label, same font/color/padding) so all three badge chips read
+    // as one consistent control row. Hidden unless ota_update_service.c has
     // found a newer release; tap shows a brief toast (fw_update_toast below).
-    fw_update_icon = lv_label_create(status_badge);
-    lv_label_set_text(fw_update_icon, "FW " LV_SYMBOL_UP);
-    lv_obj_set_style_pad_left(fw_update_icon, 6, 0);
-    lv_obj_add_flag(fw_update_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(fw_update_icon, fw_update_icon_click_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_flag(fw_update_icon, LV_OBJ_FLAG_HIDDEN);
+    fw_led = lv_obj_create(status_badge);
+    lv_obj_set_size(fw_led, 8, 8);
+    lv_obj_set_style_radius(fw_led, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(fw_led, lv_color_hex(0xf59e0b), 0);
+    lv_obj_set_style_border_width(fw_led, 0, 0);
+    lv_obj_set_style_pad_left(fw_led, 6, 0);
+    lv_obj_clear_flag(fw_led, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(fw_led, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(fw_led, fw_led_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(fw_led, LV_OBJ_FLAG_HIDDEN);
+
+    fw_led_label = lv_label_create(status_badge);
+    lv_label_set_text(fw_led_label, "FW");
+    lv_obj_set_style_text_font(fw_led_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(fw_led_label, lv_color_hex(0x8b949e), 0);
+    lv_obj_add_flag(fw_led_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(fw_led_label, fw_led_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(fw_led_label, LV_OBJ_FLAG_HIDDEN);
 
     fw_update_toast = lv_obj_create(radar_area);
     lv_obj_set_height(fw_update_toast, LV_SIZE_CONTENT);
@@ -1364,6 +1393,8 @@ void radar_ui_build(void) {
 
     fw_update_toast_label = lv_label_create(fw_update_toast);
     lv_obj_set_style_text_color(fw_update_toast_label, lv_color_hex(0xf59e0b), 0);
+    lv_obj_set_width(fw_update_toast_label, 240);
+    lv_label_set_long_mode(fw_update_toast_label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(fw_update_toast_label, "");
 
     lv_obj_t *home = lv_obj_create(radar_area);

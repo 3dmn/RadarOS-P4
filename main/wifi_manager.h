@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 #include "i18n.h"
 #include "airports.h"
 
@@ -31,9 +34,18 @@ extern char g_mqtt_device_id[MQTT_DEVICE_ID_LEN];
 
 // HTTPS URL of the version.json manifest checked by ota_update_service.c
 // (e.g. a raw GitHub URL to "version.json" in the firmware repo). Empty by
-// default - the update checker stays idle until it is configured on the
-// System tab.
+// default - ota_update_get_manifest_url() then falls back to
+// DEFAULT_OTA_MANIFEST_URL, so the checker is active out of the box.
 extern char g_ota_version_url[OTA_VERSION_URL_LEN];
+
+// Serializes every outbound HTTPS request across the app (ADS-B polling,
+// map tile fetches). Each mbedTLS handshake needs a sizable chunk of
+// internal (non-PSRAM) DMA-capable RAM; running several concurrently starves
+// the Wi-Fi SDIO driver's own DMA buffers and crashes with
+// "assert failed: sdio_rx_get_buffer". Created in wifi_manager_init() -
+// take it before opening a TLS connection (esp_http_client_open() /
+// esp_https_ota()) and give it back once the connection is closed.
+extern SemaphoreHandle_t g_https_mutex;
 
 // Initializes NVS, loads the saved configuration, tries to connect to Wi-Fi
 // in STA mode (with a timeout). On failure, starts the "RadarADSB-Setup"

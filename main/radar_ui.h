@@ -117,10 +117,11 @@ void radar_ui_update_wifi_status(wifi_status_t status);
 // just the Wi-Fi indicator); status is only meaningful when enabled=true.
 void radar_ui_update_mqtt_status(bool enabled, mqtt_conn_status_t status);
 
-// Firmware update indicator, appended to the same HUD status badge. Hidden
-// by default; appears (with a pulsing amber icon) only once
-// ota_update_service.c has confirmed a newer release is available. Tapping
-// it shows a brief toast with the version number. available=false hides the
-// icon again (and the badge shrinks back down); latest_version may be
-// NULL/ignored when available=false.
-void radar_ui_update_fw_status(bool available, const char *latest_version);
+// Firmware update indicator, appended to the same HUD status badge - built
+// the same way as the Wi-Fi/MQTT chips (a pulsing amber dot + "FW" label).
+// Hidden by default; appears only once ota_update_service.c has confirmed a
+// newer release is available. Tapping it shows a brief toast with the
+// version number and release notes (when known). available=false hides the
+// chip again (and the badge shrinks back down); latest_version/release_notes
+// may be NULL/ignored when available=false.
+void radar_ui_update_fw_status(bool available, const char *latest_version, const char *release_notes);
