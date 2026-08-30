@@ -1,3 +1,5 @@
+📖 [Wersja polska (README.pl.md)](README.pl.md)
+
 # RadarOS P4 📡✈️
 
 **Standalone ESP32-P4 ADS-B Flight Radar HUD & Web Station.**
