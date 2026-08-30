@@ -28,7 +28,9 @@ RadarOS-P4 turns an **ESP32-P4** with a **7" MIPI-DSI touchscreen (1024×600)** 
 - [Disclaimer & License](#disclaimer--license)
 
 ---
-
+<p align="center">
+  <img src="docs/images/IMG_0507.JPEG" alt="Radar Screen" width="700">
+</p>
 ## Key Features
 
 - **Live ADS-B Tracking** — real-time feed from [adsb.fi](https://adsb.fi) and [airplanes.live](https://airplanes.live), with a **dynamic query radius**: the request distance (in nautical miles) is derived from the HUD's currently selected range (e.g. 50 km → 27 NM, 100 km → 54 NM, 250 km → 135 NM) instead of a fixed worst-case radius, keeping API responses small and fast even over dense metro airspace.
