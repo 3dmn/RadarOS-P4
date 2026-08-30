@@ -18,6 +18,7 @@
 #include "radar_ui.h"
 #include "photo_service.h"
 #include "map_tile_service.h"
+#include "mqtt_service.h"
 #include "i18n.h"
 
 // Vector aircraft graphics - generated LVGL files, compiled as separate
@@ -95,7 +96,6 @@ static lv_obj_t *list_cont;
 static lv_obj_t *lbl_status_count;
 static lv_obj_t *lbl_range_header;
 static lv_obj_t *lbl_range_scope;
-static lv_obj_t *lbl_range_pill;
 static lv_obj_t *btn_filter_ground;
 static lv_obj_t *lbl_filter_ground;
 static lv_obj_t *btn_airport_toggle;
@@ -120,6 +120,59 @@ static lv_obj_t *popup_lbl_route;
 static lv_obj_t *banner_alert;
 static lv_obj_t *banner_lbl;
 static bool banner_visible_prev = false;
+
+// Wi-Fi status notification card - overlay shown on top of the whole
+// screen (like banner_alert above) reporting AP/connecting/connected state.
+typedef enum {
+    WIFI_NOTIFY_NONE = 0,
+    WIFI_NOTIFY_AP,
+    WIFI_NOTIFY_CONNECTING,
+    WIFI_NOTIFY_CONNECTED,
+} wifi_notify_state_t;
+
+static lv_obj_t *wifi_card;
+static lv_obj_t *wifi_card_title;
+static lv_obj_t *wifi_card_body;
+static lv_timer_t *wifi_card_hide_timer = NULL;
+// True once radar_ui_build() has created the card widgets - notify calls
+// arriving earlier (Wi-Fi connects during wifi_manager_init(), before the
+// display is even started) only update the cached state below, which is
+// applied to the freshly built card at the end of radar_ui_build().
+static bool wifi_card_ready = false;
+
+static wifi_notify_state_t s_wifi_notify_state = WIFI_NOTIFY_NONE;
+static char s_wifi_notify_ssid[WIFI_SSID_MAX_LEN] = "";
+static char s_wifi_notify_pass[WIFI_PASS_MAX_LEN] = "";
+static char s_wifi_notify_ip[32] = "";
+
+// MQTT status notification card - independent twin of wifi_card above,
+// positioned below it so the two never visually overlap if both are
+// briefly visible around the same time (e.g. Wi-Fi reconnect while MQTT
+// is also mid-reconnect).
+typedef enum {
+    MQTT_NOTIFY_NONE = 0,
+    MQTT_NOTIFY_CONNECTING,
+    MQTT_NOTIFY_CONNECTED,
+    MQTT_NOTIFY_ERROR,
+} mqtt_notify_state_t;
+
+static lv_obj_t *mqtt_card;
+static lv_obj_t *mqtt_card_title;
+static lv_obj_t *mqtt_card_body;
+static lv_timer_t *mqtt_card_hide_timer = NULL;
+static bool mqtt_card_ready = false;
+static mqtt_notify_state_t s_mqtt_notify_state = MQTT_NOTIFY_NONE;
+
+// HUD status badge (bottom-left of radar_area) - compact, persistent LED
+// indicators for Wi-Fi and (when enabled) MQTT connection health.
+static lv_obj_t *status_badge;
+static lv_obj_t *wifi_led;
+static lv_obj_t *mqtt_led;
+static lv_obj_t *mqtt_led_label;
+static bool status_badge_ready = false;
+static wifi_status_t s_wifi_led_status = WIFI_STATUS_CONNECTING;
+static bool s_mqtt_led_enabled = false;
+static mqtt_conn_status_t s_mqtt_led_status = MQTT_STATUS_DISABLED;
 
 // Emergency squawk code priority: 7500 (hijack) > 7700 (general emergency) >
 // 7600 (radio failure). Returns 0 when the code is not an emergency.
@@ -551,22 +604,43 @@ void radar_ui_refresh(void) {
 }
 
 // ================= BUTTON EVENTS =================
-static void switch_range(void) {
-    current_range_idx = (current_range_idx + 1) % NUM_RANGE_STEPS;
+static void apply_range_index(int idx) {
+    current_range_idx = idx;
     float current_range = range_steps[current_range_idx];
 
     bsp_display_lock(0);
     lv_label_set_text_fmt(lbl_range_header, "RNG: %.0fKM", current_range);
     lv_label_set_text_fmt(lbl_range_scope, "%.0fKM", current_range);
-    lv_label_set_text_fmt(lbl_range_pill, "<> %.0f km", current_range);
     bsp_display_unlock();
 
     map_tile_service_request_reload(g_radar_lat, g_radar_lon, current_range);
     radar_ui_refresh();
+    mqtt_service_publish_state();
+}
+
+static void switch_range(void) {
+    apply_range_index((current_range_idx + 1) % NUM_RANGE_STEPS);
 }
 
 static void range_click_event_cb(lv_event_t *e) {
     switch_range();
+}
+
+void radar_ui_set_range_km(float km) {
+    int best_idx = 0;
+    float best_diff = 1e9f;
+    for (size_t i = 0; i < NUM_RANGE_STEPS; i++) {
+        float diff = fabsf(range_steps[i] - km);
+        if (diff < best_diff) {
+            best_diff = diff;
+            best_idx = (int)i;
+        }
+    }
+    apply_range_index(best_idx);
+}
+
+float radar_ui_get_range_km(void) {
+    return range_steps[current_range_idx];
 }
 
 static void apply_air_filter_style(void) {
@@ -586,18 +660,30 @@ static void apply_air_filter_style(void) {
     }
 }
 
-static void filter_click_event_cb(lv_event_t *e) {
-    air_filter_mode = (air_filter_mode + 1) % 3;
+static void set_air_filter_internal(air_filter_mode_t mode) {
+    air_filter_mode = mode;
     bsp_display_lock(0);
     apply_air_filter_style();
     bsp_display_unlock();
 
     radar_ui_refresh();
+    mqtt_service_publish_state();
 }
 
-static void airport_toggle_click_event_cb(lv_event_t *e) {
-    show_airports = !show_airports;
-    bsp_display_lock(0);
+static void filter_click_event_cb(lv_event_t *e) {
+    set_air_filter_internal((air_filter_mode + 1) % 3);
+}
+
+void radar_ui_set_air_filter(air_filter_mode_t mode) {
+    if (mode > AIR_FILTER_MIL) mode = AIR_FILTER_ALL;
+    set_air_filter_internal(mode);
+}
+
+air_filter_mode_t radar_ui_get_air_filter(void) {
+    return air_filter_mode;
+}
+
+static void apply_airport_toggle_style(void) {
     if (show_airports) {
         lv_obj_set_style_bg_color(btn_airport_toggle, lv_color_hex(0x002b11), 0);
         lv_obj_set_style_border_color(btn_airport_toggle, lv_color_hex(0x005522), 0);
@@ -607,9 +693,28 @@ static void airport_toggle_click_event_cb(lv_event_t *e) {
         lv_obj_set_style_border_color(btn_airport_toggle, lv_color_hex(0xff5555), 0);
         lv_label_set_text(lbl_airport_toggle, "APTS: OFF");
     }
+}
+
+static void set_airports_enabled_internal(bool on) {
+    show_airports = on;
+    bsp_display_lock(0);
+    apply_airport_toggle_style();
     bsp_display_unlock();
 
     radar_ui_refresh();
+    mqtt_service_publish_state();
+}
+
+static void airport_toggle_click_event_cb(lv_event_t *e) {
+    set_airports_enabled_internal(!show_airports);
+}
+
+void radar_ui_set_airports_enabled(bool on) {
+    set_airports_enabled_internal(on);
+}
+
+bool radar_ui_get_airports_enabled(void) {
+    return show_airports;
 }
 
 static void apply_gnd_filter_style(void) {
@@ -626,13 +731,26 @@ static void apply_gnd_filter_style(void) {
     }
 }
 
-static void gnd_toggle_click_event_cb(lv_event_t *e) {
-    hide_ground_traffic = !hide_ground_traffic;
+static void set_hide_ground_internal(bool hide) {
+    hide_ground_traffic = hide;
     bsp_display_lock(0);
     apply_gnd_filter_style();
     bsp_display_unlock();
 
     radar_ui_refresh();
+    mqtt_service_publish_state();
+}
+
+static void gnd_toggle_click_event_cb(lv_event_t *e) {
+    set_hide_ground_internal(!hide_ground_traffic);
+}
+
+void radar_ui_set_show_ground(bool show) {
+    set_hide_ground_internal(!show);
+}
+
+bool radar_ui_get_show_ground(void) {
+    return !hide_ground_traffic;
 }
 
 static void apply_map_toggle_style(void) {
@@ -650,11 +768,25 @@ static void apply_map_toggle_style(void) {
     }
 }
 
-static void map_toggle_click_event_cb(lv_event_t *e) {
-    map_tile_service_set_enabled(!map_tile_service_is_enabled());
+static void set_map_enabled_internal(bool on) {
+    map_tile_service_set_enabled(on);
     bsp_display_lock(0);
     apply_map_toggle_style();
     bsp_display_unlock();
+
+    mqtt_service_publish_state();
+}
+
+static void map_toggle_click_event_cb(lv_event_t *e) {
+    set_map_enabled_internal(!map_tile_service_is_enabled());
+}
+
+void radar_ui_set_map_enabled(bool on) {
+    set_map_enabled_internal(on);
+}
+
+bool radar_ui_get_map_enabled(void) {
+    return map_tile_service_is_enabled();
 }
 
 static void select_aircraft_by_index(int idx) {
@@ -767,6 +899,248 @@ static void create_radar_circle(lv_obj_t *parent, int radius) {
     lv_obj_clear_flag(circ, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 }
 
+// ================= WI-FI STATUS NOTIFICATION =================
+static void wifi_card_hide_timer_cb(lv_timer_t *timer) {
+    (void)timer;
+    lv_obj_add_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
+    // The timer is a one-shot (repeat count 1) - LVGL deletes it right after
+    // this callback returns, so drop our reference to avoid a dangling
+    // lv_timer_del() call on it from apply_wifi_card() later.
+    wifi_card_hide_timer = NULL;
+}
+
+// Applies s_wifi_notify_state/ssid/pass/ip to the card widgets. Takes
+// bsp_display_lock() itself - never call this while already holding it.
+static void apply_wifi_card(void) {
+    if (!wifi_card_ready) return;
+
+    bsp_display_lock(0);
+
+    if (wifi_card_hide_timer) {
+        lv_timer_del(wifi_card_hide_timer);
+        wifi_card_hide_timer = NULL;
+    }
+
+    switch (s_wifi_notify_state) {
+        case WIFI_NOTIFY_AP: {
+            lv_obj_set_style_border_color(wifi_card, lv_color_hex(0x00e676), 0);
+            lv_obj_set_style_text_color(wifi_card_title, lv_color_hex(0xffc107), 0);
+            lv_label_set_text(wifi_card_title, LV_SYMBOL_WARNING);
+            const char *pass_display = s_wifi_notify_pass[0] ? s_wifi_notify_pass : T(STR_WIFI_NONE_OPEN);
+            lv_label_set_text_fmt(wifi_card_body, "%s\n%s: %s\n%s: %s\nhttp://192.168.4.1",
+                                   T(STR_WIFI_AP_TITLE),
+                                   T(STR_WIFI_SSID_LABEL), s_wifi_notify_ssid,
+                                   T(STR_WIFI_PASSWORD_LABEL), pass_display);
+            lv_obj_clear_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
+            break;
+        }
+        case WIFI_NOTIFY_CONNECTING:
+            lv_obj_set_style_border_color(wifi_card, lv_color_hex(0x00f0ff), 0);
+            lv_obj_set_style_text_color(wifi_card_title, lv_color_hex(0x00f0ff), 0);
+            lv_label_set_text(wifi_card_title, LV_SYMBOL_REFRESH);
+            lv_label_set_text_fmt(wifi_card_body, T(STR_WIFI_CONNECTING_FMT), s_wifi_notify_ssid);
+            lv_obj_clear_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
+            break;
+        case WIFI_NOTIFY_CONNECTED:
+            lv_obj_set_style_border_color(wifi_card, lv_color_hex(0x00e676), 0);
+            lv_obj_set_style_text_color(wifi_card_title, lv_color_hex(0x00e676), 0);
+            lv_label_set_text(wifi_card_title, LV_SYMBOL_OK);
+            lv_label_set_text_fmt(wifi_card_body, T(STR_WIFI_CONNECTED_FMT), s_wifi_notify_ip);
+            lv_obj_clear_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
+            wifi_card_hide_timer = lv_timer_create(wifi_card_hide_timer_cb, 3500, NULL);
+            lv_timer_set_repeat_count(wifi_card_hide_timer, 1);
+            break;
+        default:
+            lv_obj_add_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
+            break;
+    }
+
+    bsp_display_unlock();
+}
+
+void radar_ui_wifi_notify_ap_mode(const char *ap_ssid, const char *ap_password) {
+    s_wifi_notify_state = WIFI_NOTIFY_AP;
+    snprintf(s_wifi_notify_ssid, sizeof(s_wifi_notify_ssid), "%s", ap_ssid ? ap_ssid : "");
+    snprintf(s_wifi_notify_pass, sizeof(s_wifi_notify_pass), "%s", ap_password ? ap_password : "");
+    apply_wifi_card();
+}
+
+void radar_ui_wifi_notify_connecting(const char *ssid) {
+    s_wifi_notify_state = WIFI_NOTIFY_CONNECTING;
+    snprintf(s_wifi_notify_ssid, sizeof(s_wifi_notify_ssid), "%s", ssid ? ssid : "");
+    apply_wifi_card();
+}
+
+void radar_ui_wifi_notify_connected(const char *ip_str) {
+    s_wifi_notify_state = WIFI_NOTIFY_CONNECTED;
+    snprintf(s_wifi_notify_ip, sizeof(s_wifi_notify_ip), "%s", ip_str ? ip_str : "");
+    apply_wifi_card();
+}
+
+static void mqtt_card_hide_timer_cb(lv_timer_t *timer) {
+    (void)timer;
+    lv_obj_add_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
+    // One-shot timer - LVGL deletes it right after this callback returns.
+    mqtt_card_hide_timer = NULL;
+}
+
+// Applies s_mqtt_notify_state to the card widgets. Takes bsp_display_lock()
+// itself - never call this while already holding it.
+static void apply_mqtt_card(void) {
+    if (!mqtt_card_ready) return;
+
+    bsp_display_lock(0);
+
+    if (mqtt_card_hide_timer) {
+        lv_timer_del(mqtt_card_hide_timer);
+        mqtt_card_hide_timer = NULL;
+    }
+
+    switch (s_mqtt_notify_state) {
+        case MQTT_NOTIFY_CONNECTING:
+            lv_obj_set_style_border_color(mqtt_card, lv_color_hex(0x00f0ff), 0);
+            lv_obj_set_style_text_color(mqtt_card_title, lv_color_hex(0x00f0ff), 0);
+            lv_label_set_text(mqtt_card_title, LV_SYMBOL_REFRESH);
+            lv_label_set_text(mqtt_card_body, T(STR_MQTT_CONNECTING_MSG));
+            lv_obj_clear_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
+            break;
+        case MQTT_NOTIFY_CONNECTED:
+            lv_obj_set_style_border_color(mqtt_card, lv_color_hex(0x00e676), 0);
+            lv_obj_set_style_text_color(mqtt_card_title, lv_color_hex(0x00e676), 0);
+            lv_label_set_text(mqtt_card_title, LV_SYMBOL_OK);
+            lv_label_set_text(mqtt_card_body, T(STR_MQTT_CONNECTED_MSG));
+            lv_obj_clear_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
+            mqtt_card_hide_timer = lv_timer_create(mqtt_card_hide_timer_cb, 3500, NULL);
+            lv_timer_set_repeat_count(mqtt_card_hide_timer, 1);
+            break;
+        case MQTT_NOTIFY_ERROR:
+            lv_obj_set_style_border_color(mqtt_card, lv_color_hex(0xef4444), 0);
+            lv_obj_set_style_text_color(mqtt_card_title, lv_color_hex(0xef4444), 0);
+            lv_label_set_text(mqtt_card_title, LV_SYMBOL_WARNING);
+            lv_label_set_text(mqtt_card_body, T(STR_MQTT_ERROR_MSG));
+            lv_obj_clear_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
+            mqtt_card_hide_timer = lv_timer_create(mqtt_card_hide_timer_cb, 5000, NULL);
+            lv_timer_set_repeat_count(mqtt_card_hide_timer, 1);
+            break;
+        default:
+            lv_obj_add_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
+            break;
+    }
+
+    bsp_display_unlock();
+}
+
+void radar_ui_mqtt_notify_connecting(void) {
+    s_mqtt_notify_state = MQTT_NOTIFY_CONNECTING;
+    apply_mqtt_card();
+}
+
+void radar_ui_mqtt_notify_connected(void) {
+    s_mqtt_notify_state = MQTT_NOTIFY_CONNECTED;
+    apply_mqtt_card();
+}
+
+void radar_ui_mqtt_notify_error(void) {
+    s_mqtt_notify_state = MQTT_NOTIFY_ERROR;
+    apply_mqtt_card();
+}
+
+// Opacity-pulse animation shared by both status LEDs - breathing/blinking
+// speed and range vary by connection state (see set_led_indicator() below).
+static void led_pulse_anim_cb(void *var, int32_t val) {
+    lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)val, 0);
+}
+
+static void start_led_pulse(lv_obj_t *led_obj, uint32_t period_ms, lv_opa_t min_opa, lv_opa_t max_opa) {
+    lv_anim_del(led_obj, NULL); // stop any previous animation on this LED
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, led_obj);
+    lv_anim_set_values(&a, min_opa, max_opa);
+    lv_anim_set_time(&a, period_ms);
+    lv_anim_set_playback_time(&a, period_ms);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_exec_cb(&a, led_pulse_anim_cb);
+    lv_anim_start(&a);
+}
+
+static void stop_led_pulse(lv_obj_t *led_obj) {
+    lv_anim_del(led_obj, NULL);
+    lv_obj_set_style_opa(led_obj, LV_OPA_COVER, 0);
+}
+
+typedef enum {
+    LED_STATE_CONNECTED,
+    LED_STATE_CONNECTING,
+    LED_STATE_ERROR,
+} led_conn_state_t;
+
+// Sets the LED color and (re)starts the animation matching the connection
+// state: connecting pulses fast and wide (attention-grabbing), connected
+// breathes slowly and subtly (idle "radar is alive" feel), error blinks
+// quickly as a visible warning.
+static void set_led_indicator(lv_obj_t *led_obj, led_conn_state_t state) {
+    switch (state) {
+        case LED_STATE_CONNECTED:
+            lv_obj_set_style_bg_color(led_obj, lv_color_hex(0x22c55e), 0);
+            start_led_pulse(led_obj, 1500, LV_OPA_40, LV_OPA_COVER);
+            break;
+        case LED_STATE_CONNECTING:
+            lv_obj_set_style_bg_color(led_obj, lv_color_hex(0xeab308), 0);
+            start_led_pulse(led_obj, 400, LV_OPA_20, LV_OPA_COVER);
+            break;
+        case LED_STATE_ERROR:
+        default:
+            lv_obj_set_style_bg_color(led_obj, lv_color_hex(0xef4444), 0);
+            start_led_pulse(led_obj, 200, LV_OPA_30, LV_OPA_COVER);
+            break;
+    }
+}
+
+// Applies s_wifi_led_status/s_mqtt_led_enabled/s_mqtt_led_status to the
+// badge LEDs. Takes bsp_display_lock() itself - never call while holding it.
+static void apply_status_badge(void) {
+    if (!status_badge_ready) return;
+
+    bsp_display_lock(0);
+
+    switch (s_wifi_led_status) {
+        case WIFI_STATUS_CONNECTED:  set_led_indicator(wifi_led, LED_STATE_CONNECTED); break;
+        case WIFI_STATUS_CONNECTING: set_led_indicator(wifi_led, LED_STATE_CONNECTING); break;
+        case WIFI_STATUS_ERROR:      set_led_indicator(wifi_led, LED_STATE_ERROR); break;
+    }
+
+    if (!s_mqtt_led_enabled) {
+        // MQTT disabled in configuration - stop the animation before
+        // hiding so it doesn't keep ticking on a hidden object.
+        stop_led_pulse(mqtt_led);
+        lv_obj_add_flag(mqtt_led, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(mqtt_led_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(mqtt_led, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(mqtt_led_label, LV_OBJ_FLAG_HIDDEN);
+        switch (s_mqtt_led_status) {
+            case MQTT_STATUS_CONNECTED:  set_led_indicator(mqtt_led, LED_STATE_CONNECTED); break;
+            case MQTT_STATUS_CONNECTING: set_led_indicator(mqtt_led, LED_STATE_CONNECTING); break;
+            case MQTT_STATUS_ERROR:      set_led_indicator(mqtt_led, LED_STATE_ERROR); break;
+            default:                     set_led_indicator(mqtt_led, LED_STATE_ERROR); break;
+        }
+    }
+
+    bsp_display_unlock();
+}
+
+void radar_ui_update_wifi_status(wifi_status_t status) {
+    s_wifi_led_status = status;
+    apply_status_badge();
+}
+
+void radar_ui_update_mqtt_status(bool enabled, mqtt_conn_status_t status) {
+    s_mqtt_led_enabled = enabled;
+    s_mqtt_led_status = status;
+    apply_status_badge();
+}
+
 // ================= LVGL STRUCTURE BUILD =================
 bool radar_ui_init(void) {
     ui_slots = (AircraftSlotUI *)heap_caps_calloc(MAX_AIRCRAFT_CAPACITY, sizeof(AircraftSlotUI), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -864,21 +1238,51 @@ void radar_ui_build(void) {
         lv_obj_set_hidden(ui_airports[i].label, true);
     }
 
-    lv_obj_t *range_pill = lv_obj_create(radar_area);
-    lv_obj_set_size(range_pill, 110, 30);
-    lv_obj_align(range_pill, LV_ALIGN_BOTTOM_LEFT, 15, -15);
-    lv_obj_set_style_bg_color(range_pill, lv_color_hex(0x002b11), 0);
-    lv_obj_set_style_border_color(range_pill, lv_color_hex(0x00ff88), 0);
-    lv_obj_set_style_border_width(range_pill, 1, 0);
-    lv_obj_set_style_pad_all(range_pill, 0, 0);
-    lv_obj_set_style_radius(range_pill, 15, 0);
-    lv_obj_add_flag(range_pill, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(range_pill, range_click_event_cb, LV_EVENT_CLICKED, NULL);
+    // HUD status badge - compact Wi-Fi/MQTT LED indicator, replacing the
+    // old range pill (range is already shown by the RNG button top-right
+    // and by the range rings themselves).
+    status_badge = lv_obj_create(radar_area);
+    lv_obj_set_height(status_badge, 28);
+    lv_obj_set_width(status_badge, LV_SIZE_CONTENT);
+    lv_obj_align(status_badge, LV_ALIGN_BOTTOM_LEFT, 15, -15);
+    lv_obj_set_style_bg_color(status_badge, lv_color_hex(0x0a0f1d), 0);
+    lv_obj_set_style_bg_opa(status_badge, LV_OPA_80, 0);
+    lv_obj_set_style_border_color(status_badge, lv_color_hex(0x30363d), 0);
+    lv_obj_set_style_border_width(status_badge, 1, 0);
+    lv_obj_set_style_radius(status_badge, 9, 0);
+    lv_obj_set_style_pad_hor(status_badge, 10, 0);
+    lv_obj_set_style_pad_ver(status_badge, 0, 0);
+    lv_obj_set_style_pad_column(status_badge, 4, 0);
+    lv_obj_set_flex_flow(status_badge, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(status_badge, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(status_badge, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
-    lbl_range_pill = lv_label_create(range_pill);
-    lv_label_set_text_fmt(lbl_range_pill, "<> %.0f km", range_steps[current_range_idx]);
-    lv_obj_set_style_text_color(lbl_range_pill, lv_color_hex(0x00ff88), 0);
-    lv_obj_center(lbl_range_pill);
+    wifi_led = lv_obj_create(status_badge);
+    lv_obj_set_size(wifi_led, 8, 8);
+    lv_obj_set_style_radius(wifi_led, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(wifi_led, lv_color_hex(0x64748b), 0);
+    lv_obj_set_style_border_width(wifi_led, 0, 0);
+    lv_obj_clear_flag(wifi_led, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *wifi_led_label = lv_label_create(status_badge);
+    lv_label_set_text(wifi_led_label, "WIFI");
+    lv_obj_set_style_text_font(wifi_led_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(wifi_led_label, lv_color_hex(0x8b949e), 0);
+
+    mqtt_led = lv_obj_create(status_badge);
+    lv_obj_set_size(mqtt_led, 8, 8);
+    lv_obj_set_style_radius(mqtt_led, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(mqtt_led, lv_color_hex(0x64748b), 0);
+    lv_obj_set_style_border_width(mqtt_led, 0, 0);
+    lv_obj_set_style_pad_left(mqtt_led, 6, 0);
+    lv_obj_clear_flag(mqtt_led, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(mqtt_led, LV_OBJ_FLAG_HIDDEN);
+
+    mqtt_led_label = lv_label_create(status_badge);
+    lv_label_set_text(mqtt_led_label, "MQTT");
+    lv_obj_set_style_text_font(mqtt_led_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(mqtt_led_label, lv_color_hex(0x8b949e), 0);
+    lv_obj_add_flag(mqtt_led_label, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *home = lv_obj_create(radar_area);
     lv_obj_set_size(home, 8, 8);
@@ -1156,7 +1560,74 @@ void radar_ui_build(void) {
     lv_obj_set_style_text_color(banner_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_center(banner_lbl);
 
+    // Wi-Fi status notification card - child of scr (not radar_area, like
+    // banner_alert above) so it overlays the whole cockpit; created last so
+    // it renders on top. Starts hidden, populated by apply_wifi_card().
+    wifi_card = lv_obj_create(scr);
+    lv_obj_set_width(wifi_card, 380);
+    lv_obj_set_height(wifi_card, LV_SIZE_CONTENT);
+    lv_obj_align(wifi_card, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(wifi_card, lv_color_hex(0x0a0f1d), 0);
+    lv_obj_set_style_bg_opa(wifi_card, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(wifi_card, lv_color_hex(0x00e676), 0);
+    lv_obj_set_style_border_width(wifi_card, 2, 0);
+    lv_obj_set_style_radius(wifi_card, 12, 0);
+    lv_obj_set_style_pad_all(wifi_card, 16, 0);
+    lv_obj_set_style_shadow_width(wifi_card, 20, 0);
+    lv_obj_set_style_shadow_color(wifi_card, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_opa(wifi_card, LV_OPA_50, 0);
+    lv_obj_set_flex_flow(wifi_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(wifi_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(wifi_card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
+
+    wifi_card_title = lv_label_create(wifi_card);
+    lv_obj_set_style_text_font(wifi_card_title, &lv_font_montserrat_20, 0);
+    lv_label_set_text(wifi_card_title, "");
+
+    wifi_card_body = lv_label_create(wifi_card);
+    lv_obj_set_style_text_color(wifi_card_body, lv_color_hex(0xe6f7ee), 0);
+    lv_obj_set_style_text_align(wifi_card_body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(wifi_card_body, "");
+
+    // MQTT status notification card - independent twin of wifi_card,
+    // offset below it so the two never overlap if both happen to be
+    // visible at once.
+    mqtt_card = lv_obj_create(scr);
+    lv_obj_set_width(mqtt_card, 380);
+    lv_obj_set_height(mqtt_card, LV_SIZE_CONTENT);
+    lv_obj_align(mqtt_card, LV_ALIGN_CENTER, 0, 110);
+    lv_obj_set_style_bg_color(mqtt_card, lv_color_hex(0x0a0f1d), 0);
+    lv_obj_set_style_bg_opa(mqtt_card, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(mqtt_card, lv_color_hex(0x00e676), 0);
+    lv_obj_set_style_border_width(mqtt_card, 2, 0);
+    lv_obj_set_style_radius(mqtt_card, 12, 0);
+    lv_obj_set_style_pad_all(mqtt_card, 16, 0);
+    lv_obj_set_style_shadow_width(mqtt_card, 20, 0);
+    lv_obj_set_style_shadow_color(mqtt_card, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_opa(mqtt_card, LV_OPA_50, 0);
+    lv_obj_set_flex_flow(mqtt_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(mqtt_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(mqtt_card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
+
+    mqtt_card_title = lv_label_create(mqtt_card);
+    lv_obj_set_style_text_font(mqtt_card_title, &lv_font_montserrat_20, 0);
+    lv_label_set_text(mqtt_card_title, "");
+
+    mqtt_card_body = lv_label_create(mqtt_card);
+    lv_obj_set_style_text_color(mqtt_card_body, lv_color_hex(0xe6f7ee), 0);
+    lv_obj_set_style_text_align(mqtt_card_body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(mqtt_card_body, "");
+
     bsp_display_unlock();
+
+    wifi_card_ready = true;
+    apply_wifi_card();
+    mqtt_card_ready = true;
+    apply_mqtt_card();
+    status_badge_ready = true;
+    apply_status_badge();
 
     map_tile_service_request_reload(g_radar_lat, g_radar_lon, range_steps[current_range_idx]);
 }

@@ -23,6 +23,8 @@
 
 #include "wifi_manager.h"
 #include "version.h"
+#include "mqtt_service.h"
+#include "radar_ui.h"
 
 #define NVS_NAMESPACE           "radar_cfg"
 
@@ -46,6 +48,10 @@
 #define MAX_AIRCRAFT_DEFAULT    64
 #define MAX_AIRCRAFT_MIN        10
 #define MAX_AIRCRAFT_MAX        200
+#define MQTT_ENABLED_DEFAULT    0
+#define MQTT_PORT_DEFAULT       1883
+#define MQTT_HA_DISCOVERY_DEFAULT 1
+#define MQTT_DEVICE_ID_DEFAULT  "radaros_p4"
 
 #define AP_SSID                 "RadarADSB-Setup"
 #define AP_CHANNEL               1
@@ -76,6 +82,13 @@ static uint8_t g_squawk_alert_enabled = SQUAWK_ALERT_DEFAULT;
 static uint8_t g_lang = LANG_DEFAULT;
 static uint8_t g_trail_len = TRAIL_LEN_DEFAULT;
 static uint16_t g_max_aircraft = MAX_AIRCRAFT_DEFAULT;
+static uint8_t g_mqtt_enabled = MQTT_ENABLED_DEFAULT;
+static uint8_t g_mqtt_ha_discovery = MQTT_HA_DISCOVERY_DEFAULT;
+char g_mqtt_host[MQTT_HOST_LEN] = "";
+uint16_t g_mqtt_port = MQTT_PORT_DEFAULT;
+char g_mqtt_user[MQTT_USER_LEN] = "";
+char g_mqtt_pass[MQTT_PASS_LEN] = "";
+char g_mqtt_device_id[MQTT_DEVICE_ID_LEN] = MQTT_DEVICE_ID_DEFAULT;
 
 static bool is_valid_trail_len(uint8_t len) {
     return len == 0 || len == 15 || len == 30 || len == 60 || len == 120;
@@ -156,6 +169,24 @@ static void load_settings_from_nvs(void) {
     nvs_get_u16(my_handle, "max_aircraft", &g_max_aircraft);
     g_max_aircraft = clamp_max_aircraft(g_max_aircraft);
 
+    nvs_get_u8(my_handle, "mqtt_en", &g_mqtt_enabled);
+    if (g_mqtt_enabled > 1) g_mqtt_enabled = MQTT_ENABLED_DEFAULT;
+    nvs_get_u8(my_handle, "mqtt_ha", &g_mqtt_ha_discovery);
+    if (g_mqtt_ha_discovery > 1) g_mqtt_ha_discovery = MQTT_HA_DISCOVERY_DEFAULT;
+    len = sizeof(g_mqtt_host);
+    nvs_get_str(my_handle, "mqtt_host", g_mqtt_host, &len);
+    nvs_get_u16(my_handle, "mqtt_port", &g_mqtt_port);
+    if (g_mqtt_port == 0) g_mqtt_port = MQTT_PORT_DEFAULT;
+    len = sizeof(g_mqtt_user);
+    nvs_get_str(my_handle, "mqtt_user", g_mqtt_user, &len);
+    len = sizeof(g_mqtt_pass);
+    nvs_get_str(my_handle, "mqtt_pass", g_mqtt_pass, &len);
+    len = sizeof(g_mqtt_device_id);
+    nvs_get_str(my_handle, "mqtt_devid", g_mqtt_device_id, &len);
+    if (g_mqtt_device_id[0] == '\0') {
+        snprintf(g_mqtt_device_id, sizeof(g_mqtt_device_id), "%s", MQTT_DEVICE_ID_DEFAULT);
+    }
+
     nvs_close(my_handle);
     ESP_LOGI(TAG, "Loaded from NVS: SSID='%s' station='%s' (%.6f, %.6f)",
              g_wifi_ssid, g_station_name, g_radar_lat, g_radar_lon);
@@ -182,12 +213,27 @@ static void save_settings_to_nvs(void) {
     nvs_set_u8(my_handle, "lang", g_lang);
     nvs_set_u8(my_handle, "trail_len", g_trail_len);
     nvs_set_u16(my_handle, "max_aircraft", g_max_aircraft);
+    nvs_set_u8(my_handle, "mqtt_en", g_mqtt_enabled);
+    nvs_set_u8(my_handle, "mqtt_ha", g_mqtt_ha_discovery);
+    nvs_set_str(my_handle, "mqtt_host", g_mqtt_host);
+    nvs_set_u16(my_handle, "mqtt_port", g_mqtt_port);
+    nvs_set_str(my_handle, "mqtt_user", g_mqtt_user);
+    nvs_set_str(my_handle, "mqtt_pass", g_mqtt_pass);
+    nvs_set_str(my_handle, "mqtt_devid", g_mqtt_device_id);
     nvs_commit(my_handle);
     nvs_close(my_handle);
 }
 
 uint8_t wifi_mgr_get_brightness(void) {
     return g_brightness;
+}
+
+void wifi_mgr_set_brightness(uint8_t pct) {
+    if (pct < BRIGHTNESS_MIN) pct = BRIGHTNESS_MIN;
+    if (pct > BRIGHTNESS_MAX) pct = BRIGHTNESS_MAX;
+    bsp_display_brightness_set(pct);
+    g_brightness = pct;
+    save_settings_to_nvs();
 }
 
 int wifi_mgr_get_default_range(void) {
@@ -206,6 +252,11 @@ uint8_t wifi_mgr_get_apt_filter_mask(void) {
     return g_apt_filter_mask;
 }
 
+void wifi_mgr_set_apt_filter_mask(uint8_t mask) {
+    g_apt_filter_mask = mask & APT_TYPE_ALL;
+    save_settings_to_nvs();
+}
+
 bool wifi_mgr_get_hide_ground(void) {
     return g_hide_ground == 1;
 }
@@ -216,6 +267,11 @@ bool wifi_mgr_get_map_enabled(void) {
 
 bool wifi_mgr_get_squawk_alert_enabled(void) {
     return g_squawk_alert_enabled == 1;
+}
+
+void wifi_mgr_set_squawk_alert_enabled(bool on) {
+    g_squawk_alert_enabled = on ? 1 : 0;
+    save_settings_to_nvs();
 }
 
 app_lang_t wifi_mgr_get_lang(void) {
@@ -241,6 +297,14 @@ uint16_t wifi_mgr_get_max_aircraft(void) {
 
 void wifi_mgr_set_max_aircraft(uint16_t max_val) {
     g_max_aircraft = clamp_max_aircraft(max_val);
+}
+
+bool wifi_mgr_get_mqtt_enabled(void) {
+    return g_mqtt_enabled == 1;
+}
+
+bool wifi_mgr_get_mqtt_ha_discovery(void) {
+    return g_mqtt_ha_discovery == 1;
 }
 
 // ================= WEB PANEL =================
@@ -359,6 +423,25 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     // "Radar".
     bool ap_mode = !sta_connected;
 
+    const char *mqtt_status_label = T(STR_WEB_MQTT_STATUS_DISABLED);
+    const char *mqtt_led_color = "#64748b";
+    switch (mqtt_service_get_status()) {
+        case MQTT_STATUS_CONNECTED:
+            mqtt_status_label = T(STR_WEB_MQTT_STATUS_CONNECTED);
+            mqtt_led_color = "#22c55e";
+            break;
+        case MQTT_STATUS_CONNECTING:
+            mqtt_status_label = T(STR_WEB_MQTT_STATUS_CONNECTING);
+            mqtt_led_color = "#eab308";
+            break;
+        case MQTT_STATUS_ERROR:
+            mqtt_status_label = T(STR_WEB_MQTT_STATUS_ERROR);
+            mqtt_led_color = "#ef4444";
+            break;
+        default:
+            break;
+    }
+
     hb_append(&hb,
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -380,6 +463,9 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         ".statrow{display:flex;justify-content:space-between;align-items:center;margin-top:10px;"
         "padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:0.85em;}"
         ".statrow span:first-child{color:#8fb;}"
+        "@keyframes ledpulse{0%%,100%%{opacity:1;transform:scale(1);}50%%{opacity:0.55;transform:scale(0.8);}}"
+        ".led{width:10px;height:10px;border-radius:50%%;display:inline-block;margin-right:8px;"
+        "background:#64748b;animation:ledpulse 1.6s ease-in-out infinite;flex-shrink:0;}"
         "label{display:block;margin-top:10px;margin-bottom:4px;font-size:0.85em;color:#8fb;}"
         "input,select{width:100%%;box-sizing:border-box;height:42px;padding:0 10px;border-radius:6px;"
         "border:1px solid #30363d;background:#0d1117;color:#fff;font-size:0.95em;}"
@@ -402,10 +488,18 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "border:1px solid #145;overflow:hidden;}"
         "small{display:block;color:#8b949e;margin-top:6px;font-size:0.8em;}"
         ".tip{color:#7a889b;font-size:0.85em;cursor:help;margin-left:4px;}"
-        ".chkgrp{display:flex;flex-direction:column;gap:6px;margin-top:4px;}"
-        ".chk{display:flex!important;align-items:center;gap:8px;margin:0!important;"
-        "font-size:0.9em;color:#e6f7ee;cursor:pointer;}"
-        ".chk input{width:auto!important;height:auto!important;}"
+        ".setting-row{display:flex;justify-content:space-between;align-items:center;"
+        "margin-top:10px;gap:10px;}"
+        ".setting-label{font-size:0.9em;color:#e6f7ee;}"
+        ".switch{position:relative;display:inline-block;width:46px;height:26px;flex-shrink:0;margin:0;}"
+        ".switch input{opacity:0;width:0;height:0;}"
+        ".slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;"
+        "background-color:#334155;transition:.25s ease-in-out;border-radius:26px;}"
+        ".slider:before{position:absolute;content:'';height:20px;width:20px;left:3px;bottom:3px;"
+        "background-color:#ffffff;transition:.25s ease-in-out;border-radius:50%%;"
+        "box-shadow:0 2px 4px rgba(0,0,0,0.25);}"
+        "input:checked + .slider{background-color:#22c55e;}"
+        "input:checked + .slider:before{transform:translateX(20px);}"
         ".btn-save{width:100%%;padding:14px;background:#238636;color:#fff;font-weight:bold;"
         "border:none;border-radius:8px;font-size:1.05em;cursor:pointer;margin-top:6px;transition:background .15s;}"
         ".btn-save:hover{background:#00c853;}"
@@ -436,9 +530,10 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "<button type='button' class='tabbtn' data-tab='location' onclick=\"showTab('location')\">\xF0\x9F\x93\x8D %s</button>"
         "<button type='button' class='tabbtn%s' data-tab='wifi' onclick=\"showTab('wifi')\">\xF0\x9F\x93\xB6 %s</button>"
         "<button type='button' class='tabbtn' data-tab='system' onclick=\"showTab('system')\">\xE2\x9A\x99\xEF\xB8\x8F %s</button>"
+        "<button type='button' class='tabbtn' data-tab='mqtt' onclick=\"showTab('mqtt')\">\xF0\x9F\x93\xB6 %s</button>"
         "</div>",
         ap_mode ? "" : " active", T(STR_WEB_TAB_DISPLAY), T(STR_WEB_TAB_LOCATION),
-        ap_mode ? " active" : "", T(STR_WEB_TAB_WIFI), T(STR_WEB_TAB_SYSTEM));
+        ap_mode ? " active" : "", T(STR_WEB_TAB_WIFI), T(STR_WEB_TAB_SYSTEM), T(STR_WEB_TAB_MQTT));
 
     // TAB: Radar & Display (default in STA mode)
     hb_append(&hb, "<div class='card tabpanel' id='tab-display' style='display:%s'><h2>\xF0\x9F\x8E\x9B\xEF\xB8\x8F %s</h2>",
@@ -483,36 +578,30 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         g_air_mode == 2 ? "selected" : "", T(STR_WEB_AIR_MIL));
 
     hb_append(&hb,
-        "<div><label>%s</label><select name='hide_ground'>"
-        "<option value='1' %s>%s</option><option value='0' %s>%s</option>"
-        "</select></div>",
-        T(STR_WEB_GND),
-        g_hide_ground == 1 ? "selected" : "", T(STR_WEB_GND_HIDE),
-        g_hide_ground == 0 ? "selected" : "", T(STR_WEB_GND_SHOW));
+        "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"gnd_show\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>",
+        T(STR_WEB_GND), g_hide_ground == 0 ? "checked" : "");
 
     hb_append(&hb,
-        "<div><label>%s</label><select name='map_en'>"
-        "<option value='1' %s>%s</option><option value='0' %s>%s</option>"
-        "</select></div>",
-        T(STR_WEB_MAP),
-        g_map_enabled == 1 ? "selected" : "", T(STR_WEB_MAP_ON),
-        g_map_enabled == 0 ? "selected" : "", T(STR_WEB_MAP_OFF));
+        "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"map_en\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>",
+        T(STR_WEB_MAP), g_map_enabled == 1 ? "checked" : "");
 
     hb_append(&hb,
-        "<div><label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label><select name='sqk_alert'>"
-        "<option value='1' %s>%s</option><option value='0' %s>%s</option>"
-        "</select></div>",
+        "<div class=\"setting-row\"><span class=\"setting-label\">%s"
+        "<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"sqk_alert\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>",
         T(STR_WEB_SQUAWK_ALERT), T(STR_WEB_SQUAWK_ALERT_HINT),
-        g_squawk_alert_enabled == 1 ? "selected" : "", T(STR_WEB_SQUAWK_ON),
-        g_squawk_alert_enabled == 0 ? "selected" : "", T(STR_WEB_SQUAWK_OFF));
+        g_squawk_alert_enabled == 1 ? "checked" : "");
 
     hb_append(&hb,
-        "<div><label>%s</label><select name='apts'>"
-        "<option value='1' %s>%s</option><option value='0' %s>%s</option>"
-        "</select></div>",
-        T(STR_WEB_APTS),
-        g_apts_mode == 1 ? "selected" : "", T(STR_WEB_APTS_ON),
-        g_apts_mode == 0 ? "selected" : "", T(STR_WEB_APTS_OFF));
+        "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"apts\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>",
+        T(STR_WEB_APTS), g_apts_mode == 1 ? "checked" : "");
 
     hb_append(&hb,
         "<div><label>%s</label><select name='trail_len'>"
@@ -532,15 +621,20 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     hb_append(&hb,
         "<div style=\"margin-top:10px;\">"
         "<label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label>"
-        "<div class=\"chkgrp\">"
-        "<label class=\"chk\"><input type=\"checkbox\" name=\"apt_civil\" value=\"1\" %s>%s</label>"
-        "<label class=\"chk\"><input type=\"checkbox\" name=\"apt_mil\" value=\"1\" %s>%s</label>"
-        "<label class=\"chk\"><input type=\"checkbox\" name=\"apt_ga\" value=\"1\" %s>%s</label>"
-        "</div></div>",
+        "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"apt_civil\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>"
+        "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"apt_mil\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>"
+        "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"apt_ga\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>"
+        "</div>",
         T(STR_WEB_APT_TYPES), T(STR_WEB_APT_TYPES_HINT),
-        (g_apt_filter_mask & APT_TYPE_CIVIL) ? "checked" : "", T(STR_WEB_APT_CIVIL),
-        (g_apt_filter_mask & APT_TYPE_MIL) ? "checked" : "", T(STR_WEB_APT_MIL),
-        (g_apt_filter_mask & APT_TYPE_GA) ? "checked" : "", T(STR_WEB_APT_GA));
+        T(STR_WEB_APT_CIVIL), (g_apt_filter_mask & APT_TYPE_CIVIL) ? "checked" : "",
+        T(STR_WEB_APT_MIL), (g_apt_filter_mask & APT_TYPE_MIL) ? "checked" : "",
+        T(STR_WEB_APT_GA), (g_apt_filter_mask & APT_TYPE_GA) ? "checked" : "");
 
     hb_append(&hb, "</div>"); // #tab-display
 
@@ -625,6 +719,44 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 
     hb_append(&hb, "</div>"); // #tab-system
 
+    // TAB: MQTT & Home Assistant
+    hb_append(&hb, "<div class='card tabpanel' id='tab-mqtt' style='display:none'><h2>\xF0\x9F\x93\xB6 %s</h2>", T(STR_WEB_MQTT_SECTION));
+    hb_append(&hb,
+        "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"mqtt_en\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>",
+        T(STR_WEB_MQTT_ENABLE), g_mqtt_enabled ? "checked" : "");
+    hb_append(&hb,
+        "<div class='grid2'>"
+        "<div><label>%s</label><input type='text' name='mqtt_host' value='%s' maxlength='63' placeholder='192.168.1.100'></div>"
+        "<div><label>%s</label><input type='number' name='mqtt_port' min='1' max='65535' value='%u'></div>"
+        "</div>",
+        T(STR_WEB_MQTT_HOST), g_mqtt_host, T(STR_WEB_MQTT_PORT), (unsigned)g_mqtt_port);
+    hb_append(&hb,
+        "<div class='grid2'>"
+        "<div><label>%s</label><input type='text' name='mqtt_user' value='%s' maxlength='31' autocomplete='off'></div>"
+        "<div><label>%s</label><input type='password' name='mqtt_pass' value='' maxlength='63' placeholder='%s'></div>"
+        "</div>",
+        T(STR_WEB_MQTT_USER), g_mqtt_user, T(STR_WEB_MQTT_PASSWORD), T(STR_WEB_PASS_PLACEHOLDER));
+    hb_append(&hb,
+        "<label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label>"
+        "<input type=\"text\" name=\"mqtt_devid\" value=\"%s\" maxlength='31'>",
+        T(STR_WEB_MQTT_DEVICE_ID), T(STR_WEB_MQTT_DEVICE_ID_HINT), g_mqtt_device_id);
+    hb_append(&hb,
+        "<div class=\"setting-row\" style='margin-top:10px;'><span class=\"setting-label\">%s"
+        "<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"mqtt_ha\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>",
+        T(STR_WEB_MQTT_HA_DISCOVERY), T(STR_WEB_MQTT_HA_DISCOVERY_HINT),
+        g_mqtt_ha_discovery ? "checked" : "");
+    hb_append(&hb,
+        "<div class='statrow'><span>%s</span>"
+        "<span style='display:flex;align-items:center;'>"
+        "<span id='mqtt-led' class='led' style='background:%s;'></span>"
+        "<span id='mqtt-status-val'>%s</span></span></div>",
+        T(STR_WEB_MQTT_STATUS), mqtt_led_color, mqtt_status_label);
+    hb_append(&hb, "</div>"); // #tab-mqtt
+
     // Fixed version footer - outside the tab panels (visible on every tab),
     // right above the save button.
     hb_append(&hb,
@@ -643,10 +775,11 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "var I18N={scanning:'%s',scanFoundPrefix:'%s',scanFoundSuffix:'%s',scanNone:'%s',"
         "saving:'%s',rebooting:'%s',saveError:'%s',"
         "importOk:'%s',importError:'%s',importSelectFile:'%s',"
-        "otaUploading:'%s',otaOk:'%s',otaError:'%s',otaSelectFile:'%s'};"
+        "otaUploading:'%s',otaOk:'%s',otaError:'%s',otaSelectFile:'%s',"
+        "mqttConnected:'%s',mqttConnecting:'%s',mqttError:'%s',mqttDisabled:'%s'};"
         "var __map=null,__marker=null;"
         "function showTab(name){"
-        "['display','location','wifi','system'].forEach(function(k){"
+        "['display','location','wifi','system','mqtt'].forEach(function(k){"
         "var el=document.getElementById('tab-'+k);"
         "if(el)el.style.display=(k===name)?'block':'none';"
         "});"
@@ -752,15 +885,31 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "bar.style.width='100%%';"
         "st.textContent=I18N.otaOk+' '+I18N.rebooting;"
         "}else{"
-        "st.textContent=I18N.otaError;btn.disabled=false;"
+        "st.textContent=I18N.otaError+(xhr.responseText?(' - '+xhr.responseText):'');"
+        "btn.disabled=false;"
         "}"
         "};"
         "xhr.onerror=function(){st.textContent=I18N.otaError;btn.disabled=false;};"
         "xhr.send(f.files[0]);"
         "}"
+        "function pollMqttStatus(){"
+        "var el=document.getElementById('mqtt-status-val');"
+        "var led=document.getElementById('mqtt-led');"
+        "if(!el)return;"
+        "fetch('/mqtt_status').then(function(r){return r.text();}).then(function(s){"
+        "var color='#64748b',label=I18N.mqttDisabled;"
+        "if(s==='connected'){color='#22c55e';label=I18N.mqttConnected;}"
+        "else if(s==='connecting'){color='#eab308';label=I18N.mqttConnecting;}"
+        "else if(s==='error'){color='#ef4444';label=I18N.mqttError;}"
+        "el.textContent=label;"
+        "if(led)led.style.background=color;"
+        "}).catch(function(){});"
+        "}"
         "document.addEventListener('DOMContentLoaded',function(){"
         "var isAP=IS_AP_MODE||(window.location.hostname==='192.168.4.1');"
         "if(isAP){showTab('wifi');scanWifi();}"
+        "pollMqttStatus();"
+        "setInterval(pollMqttStatus,4000);"
         "});"
         "</script>"
         "</body></html>",
@@ -768,7 +917,9 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         T(STR_WEB_SCANNING), T(STR_WEB_SCAN_FOUND_PREFIX), T(STR_WEB_SCAN_FOUND_SUFFIX), T(STR_WEB_SCAN_NONE),
         T(STR_WEB_SAVING_MSG), T(STR_WEB_REBOOTING_MSG), T(STR_WEB_SAVE_ERROR),
         T(STR_WEB_IMPORT_OK), T(STR_WEB_IMPORT_ERROR), T(STR_WEB_IMPORT_SELECT_FILE),
-        T(STR_WEB_OTA_UPLOADING), T(STR_WEB_OTA_OK), T(STR_WEB_OTA_ERROR), T(STR_WEB_OTA_SELECT_FILE));
+        T(STR_WEB_OTA_UPLOADING), T(STR_WEB_OTA_OK), T(STR_WEB_OTA_ERROR), T(STR_WEB_OTA_SELECT_FILE),
+        T(STR_WEB_MQTT_STATUS_CONNECTED), T(STR_WEB_MQTT_STATUS_CONNECTING),
+        T(STR_WEB_MQTT_STATUS_ERROR), T(STR_WEB_MQTT_STATUS_DISABLED));
 
     if (hb.pos >= hb.cap - 1) {
         ESP_LOGE(TAG, "Web page exceeded buffer (%d B) - response truncated!", HTML_PAGE_BUF_SIZE);
@@ -780,7 +931,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-#define SAVE_BODY_MAX_LEN 512
+#define SAVE_BODY_MAX_LEN 1024
 
 static esp_err_t save_post_handler(httpd_req_t *req) {
     int total_len = req->content_len;
@@ -850,31 +1001,22 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         int v = atoi(param);
         g_air_mode = (v >= 0 && v <= 2) ? (uint8_t)v : AIR_MODE_DEFAULT;
     }
-    if (httpd_query_key_value(buf, "apts", param, sizeof(param)) == ESP_OK) {
-        url_decode(param);
-        g_apts_mode = (atoi(param) == 1) ? 1 : 0;
-    }
+    // Toggle switches are rendered as checkboxes now - unchecked ones are
+    // not sent in the form at all, so their state is derived purely from
+    // whether the key is present, not from its value.
+    g_apts_mode = (httpd_query_key_value(buf, "apts", param, sizeof(param)) == ESP_OK) ? 1 : 0;
     {
-        // Unchecked checkboxes are not sent in the form - a missing key
-        // means the type is disabled, so the mask is built from zero.
         uint8_t mask = 0;
         if (httpd_query_key_value(buf, "apt_civil", param, sizeof(param)) == ESP_OK) mask |= APT_TYPE_CIVIL;
         if (httpd_query_key_value(buf, "apt_mil", param, sizeof(param)) == ESP_OK) mask |= APT_TYPE_MIL;
         if (httpd_query_key_value(buf, "apt_ga", param, sizeof(param)) == ESP_OK) mask |= APT_TYPE_GA;
         g_apt_filter_mask = mask;
     }
-    if (httpd_query_key_value(buf, "hide_ground", param, sizeof(param)) == ESP_OK) {
-        url_decode(param);
-        g_hide_ground = (atoi(param) == 1) ? 1 : 0;
-    }
-    if (httpd_query_key_value(buf, "map_en", param, sizeof(param)) == ESP_OK) {
-        url_decode(param);
-        g_map_enabled = (atoi(param) == 1) ? 1 : 0;
-    }
-    if (httpd_query_key_value(buf, "sqk_alert", param, sizeof(param)) == ESP_OK) {
-        url_decode(param);
-        g_squawk_alert_enabled = (atoi(param) == 1) ? 1 : 0;
-    }
+    // The "gnd_show" checkbox is checked when ground traffic should be
+    // visible, which is the inverse of g_hide_ground.
+    g_hide_ground = (httpd_query_key_value(buf, "gnd_show", param, sizeof(param)) == ESP_OK) ? 0 : 1;
+    g_map_enabled = (httpd_query_key_value(buf, "map_en", param, sizeof(param)) == ESP_OK) ? 1 : 0;
+    g_squawk_alert_enabled = (httpd_query_key_value(buf, "sqk_alert", param, sizeof(param)) == ESP_OK) ? 1 : 0;
     if (httpd_query_key_value(buf, "lang", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
         wifi_mgr_set_lang((app_lang_t)atoi(param));
@@ -890,6 +1032,29 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         if (max_val < 10)  max_val = 10;
         wifi_mgr_set_max_aircraft((uint16_t)max_val);
     }
+    g_mqtt_enabled = (httpd_query_key_value(buf, "mqtt_en", param, sizeof(param)) == ESP_OK) ? 1 : 0;
+    g_mqtt_ha_discovery = (httpd_query_key_value(buf, "mqtt_ha", param, sizeof(param)) == ESP_OK) ? 1 : 0;
+    if (httpd_query_key_value(buf, "mqtt_host", param, sizeof(param)) == ESP_OK) {
+        url_decode(param);
+        snprintf(g_mqtt_host, sizeof(g_mqtt_host), "%s", param);
+    }
+    if (httpd_query_key_value(buf, "mqtt_port", param, sizeof(param)) == ESP_OK) {
+        url_decode(param);
+        int port = atoi(param);
+        g_mqtt_port = (port > 0 && port <= 65535) ? (uint16_t)port : MQTT_PORT_DEFAULT;
+    }
+    if (httpd_query_key_value(buf, "mqtt_user", param, sizeof(param)) == ESP_OK) {
+        url_decode(param);
+        snprintf(g_mqtt_user, sizeof(g_mqtt_user), "%s", param);
+    }
+    if (httpd_query_key_value(buf, "mqtt_pass", param, sizeof(param)) == ESP_OK && strlen(param) > 0) {
+        url_decode(param);
+        snprintf(g_mqtt_pass, sizeof(g_mqtt_pass), "%s", param);
+    }
+    if (httpd_query_key_value(buf, "mqtt_devid", param, sizeof(param)) == ESP_OK) {
+        url_decode(param);
+        mqtt_sanitize_topic_id(param, g_mqtt_device_id, sizeof(g_mqtt_device_id));
+    }
     free(buf);
 
     save_settings_to_nvs();
@@ -904,9 +1069,9 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
 }
 
 // Exports the current configuration as a JSON file for the browser to
-// download. The Wi-Fi password is deliberately omitted (security) - the
-// export is meant for backing up radar settings, not for carrying network
-// credentials.
+// download. The Wi-Fi and MQTT passwords are deliberately omitted
+// (security) - the export is meant for backing up radar settings, not for
+// carrying credentials.
 static esp_err_t export_config_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "station_name", g_station_name);
@@ -924,6 +1089,12 @@ static esp_err_t export_config_get_handler(httpd_req_t *req) {
     cJSON_AddNumberToObject(root, "lang", g_lang);
     cJSON_AddNumberToObject(root, "trail_len", g_trail_len);
     cJSON_AddNumberToObject(root, "max_aircraft", g_max_aircraft);
+    cJSON_AddNumberToObject(root, "mqtt_enabled", g_mqtt_enabled);
+    cJSON_AddStringToObject(root, "mqtt_host", g_mqtt_host);
+    cJSON_AddNumberToObject(root, "mqtt_port", g_mqtt_port);
+    cJSON_AddStringToObject(root, "mqtt_user", g_mqtt_user);
+    cJSON_AddStringToObject(root, "mqtt_device_id", g_mqtt_device_id);
+    cJSON_AddNumberToObject(root, "mqtt_ha_discovery", g_mqtt_ha_discovery);
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1034,6 +1205,25 @@ static esp_err_t import_config_post_handler(httpd_req_t *req) {
     if ((item = cJSON_GetObjectItem(root, "max_aircraft")) && cJSON_IsNumber(item)) {
         wifi_mgr_set_max_aircraft((uint16_t)item->valueint);
     }
+    if ((item = cJSON_GetObjectItem(root, "mqtt_enabled")) && cJSON_IsNumber(item)) {
+        g_mqtt_enabled = (item->valueint == 1) ? 1 : 0;
+    }
+    if ((item = cJSON_GetObjectItem(root, "mqtt_host")) && cJSON_IsString(item)) {
+        snprintf(g_mqtt_host, sizeof(g_mqtt_host), "%s", item->valuestring);
+    }
+    if ((item = cJSON_GetObjectItem(root, "mqtt_port")) && cJSON_IsNumber(item)) {
+        int port = item->valueint;
+        g_mqtt_port = (port > 0 && port <= 65535) ? (uint16_t)port : MQTT_PORT_DEFAULT;
+    }
+    if ((item = cJSON_GetObjectItem(root, "mqtt_user")) && cJSON_IsString(item)) {
+        snprintf(g_mqtt_user, sizeof(g_mqtt_user), "%s", item->valuestring);
+    }
+    if ((item = cJSON_GetObjectItem(root, "mqtt_device_id")) && cJSON_IsString(item)) {
+        mqtt_sanitize_topic_id(item->valuestring, g_mqtt_device_id, sizeof(g_mqtt_device_id));
+    }
+    if ((item = cJSON_GetObjectItem(root, "mqtt_ha_discovery")) && cJSON_IsNumber(item)) {
+        g_mqtt_ha_discovery = (item->valueint == 1) ? 1 : 0;
+    }
     cJSON_Delete(root);
 
     save_settings_to_nvs();
@@ -1052,6 +1242,14 @@ static esp_err_t import_config_post_handler(httpd_req_t *req) {
 // bytes (no multipart), streamed straight into the OTA partition. On
 // success the restart happens after a ~2s delay (see restart_task), so the
 // browser has time to show the message/progress bar at 100%.
+// ESP-IDF app images always start with this magic byte. Checked before any
+// OTA partition is touched, so a malformed upload (most commonly a browser
+// sending multipart/form-data instead of the raw .bin body, which starts
+// with '-' from "------WebKitFormBoundary...") is rejected outright instead
+// of writing garbage into the OTA partition and bricking the device on the
+// next boot (invalid header / bootloop).
+#define ESP_IMAGE_MAGIC_BYTE 0xE9
+
 static esp_err_t update_post_handler(httpd_req_t *req) {
     int total_len = req->content_len;
     if (total_len <= 0) {
@@ -1059,48 +1257,93 @@ static esp_err_t update_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
+    char *buf = malloc(OTA_RECV_CHUNK_SIZE);
+    if (!buf) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    // Read the first chunk (and validate the magic byte) before calling
+    // esp_ota_begin(), so a rejected upload never touches the OTA partition.
+    int received = httpd_req_recv(req, buf, OTA_RECV_CHUNK_SIZE);
+    if (received <= 0) {
+        free(buf);
+        ESP_LOGE(TAG, "OTA: failed to receive firmware header");
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    if ((uint8_t)buf[0] != ESP_IMAGE_MAGIC_BYTE) {
+        free(buf);
+        ESP_LOGE(TAG, "Invalid binary format: multipart boundary detected instead of raw .bin");
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "Invalid firmware file: expected a raw .bin image (magic byte 0xE9)");
+        return ESP_OK;
+    }
+
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (!update_partition) {
+        free(buf);
         ESP_LOGE(TAG, "OTA: no free update partition");
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
 
+    // OTA_WITH_SEQUENTIAL_WRITES erases flash sectors as esp_ota_write()
+    // reaches them instead of erasing the whole (8 MB) partition up front,
+    // so the first write below lands quickly instead of blocking behind a
+    // multi-second bulk erase.
     esp_ota_handle_t ota_handle;
-    esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+    esp_err_t err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle);
     if (err != ESP_OK) {
+        free(buf);
         ESP_LOGE(TAG, "OTA: esp_ota_begin failed: %s", esp_err_to_name(err));
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
+    // Critical: the first chunk was already consumed from the socket above
+    // (to peek at the magic byte) - it must still be written to flash here,
+    // otherwise the OTA partition starts with erased 0xFF bytes instead of
+    // the image header and the bootloader rejects it on next boot with
+    // "invalid header: 0xffffffff".
+    bool ota_failed = (esp_ota_write(ota_handle, buf, received) != ESP_OK);
+    int remaining = total_len - received;
 
-    char *buf = malloc(OTA_RECV_CHUNK_SIZE);
-    if (!buf) {
-        esp_ota_abort(ota_handle);
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
-
-    int remaining = total_len;
-    bool ota_failed = false;
-    while (remaining > 0) {
+    while (!ota_failed && remaining > 0) {
         int to_read = remaining < OTA_RECV_CHUNK_SIZE ? remaining : OTA_RECV_CHUNK_SIZE;
-        int ret = httpd_req_recv(req, buf, to_read);
-        if (ret <= 0) {
+        int recv_len = httpd_req_recv(req, buf, to_read);
+        if (recv_len <= 0) {
+            if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) {
+                // Transient socket read timeout - the client may still be
+                // sending data, retry instead of aborting the whole upload.
+                continue;
+            }
             ota_failed = true;
             break;
         }
-        if (esp_ota_write(ota_handle, buf, ret) != ESP_OK) {
+        if (esp_ota_write(ota_handle, buf, recv_len) != ESP_OK) {
             ota_failed = true;
             break;
         }
-        remaining -= ret;
+        remaining -= recv_len;
+
+        // The httpd task is not registered with the Task Watchdog Timer, so
+        // esp_task_wdt_reset() here would fail with "task not found" - the
+        // real risk is starving the IDLE1 task (which IS watched by TWDT)
+        // on this core during a long, tight receive/write loop. Yielding
+        // briefly after every write lets IDLE1 run and feed its own
+        // watchdog entry, so a multi-MB upload completes without tripping
+        // "IDLE1 watchdog triggered".
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     free(buf);
 
-    if (ota_failed) {
+    // Only a fully-received image (remaining == 0, i.e. exactly
+    // req->content_len bytes written) is allowed to proceed - a short read
+    // must never reach esp_ota_end()/esp_ota_set_boot_partition().
+    if (ota_failed || remaining != 0) {
         esp_ota_abort(ota_handle);
-        ESP_LOGE(TAG, "OTA: firmware receive/write failed");
+        ESP_LOGE(TAG, "OTA: firmware receive/write failed (%d/%d bytes received)",
+                 total_len - remaining, total_len);
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
@@ -1232,15 +1475,26 @@ static esp_err_t set_brightness_get_handler(httpd_req_t *req) {
         httpd_query_key_value(query, "val", param, sizeof(param)) == ESP_OK) {
         val = atoi(param);
     }
-    if (val < BRIGHTNESS_MIN) val = BRIGHTNESS_MIN;
-    if (val > BRIGHTNESS_MAX) val = BRIGHTNESS_MAX;
-
-    bsp_display_brightness_set(val);
-    g_brightness = (uint8_t)val;
-    save_settings_to_nvs();
+    wifi_mgr_set_brightness((uint8_t)val);
+    mqtt_service_publish_state();
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+// Polled by the MQTT tab's JS every few seconds for a near-real-time
+// connection status readout, without a full page reload.
+static esp_err_t mqtt_status_get_handler(httpd_req_t *req) {
+    const char *status_str = "disabled";
+    switch (mqtt_service_get_status()) {
+        case MQTT_STATUS_CONNECTED:  status_str = "connected"; break;
+        case MQTT_STATUS_CONNECTING: status_str = "connecting"; break;
+        case MQTT_STATUS_ERROR:      status_str = "error"; break;
+        default:                     status_str = "disabled"; break;
+    }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, status_str);
     return ESP_OK;
 }
 
@@ -1250,6 +1504,7 @@ static void start_web_server(void) {
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 10240;
+    config.max_uri_handlers = 12;
     httpd_uri_t root_uri = {.uri = "/", .method = HTTP_GET, .handler = root_get_handler};
     httpd_uri_t save_uri = {.uri = "/save", .method = HTTP_POST, .handler = save_post_handler};
     httpd_uri_t brightness_uri = {.uri = "/set_brightness", .method = HTTP_GET, .handler = set_brightness_get_handler};
@@ -1257,6 +1512,7 @@ static void start_web_server(void) {
     httpd_uri_t export_uri = {.uri = "/export_config", .method = HTTP_GET, .handler = export_config_get_handler};
     httpd_uri_t import_uri = {.uri = "/import_config", .method = HTTP_POST, .handler = import_config_post_handler};
     httpd_uri_t update_uri = {.uri = "/update", .method = HTTP_POST, .handler = update_post_handler};
+    httpd_uri_t mqtt_status_uri = {.uri = "/mqtt_status", .method = HTTP_GET, .handler = mqtt_status_get_handler};
 
     if (httpd_start(&g_web_server, &config) == ESP_OK) {
         httpd_register_uri_handler(g_web_server, &root_uri);
@@ -1266,6 +1522,7 @@ static void start_web_server(void) {
         httpd_register_uri_handler(g_web_server, &export_uri);
         httpd_register_uri_handler(g_web_server, &import_uri);
         httpd_register_uri_handler(g_web_server, &update_uri);
+        httpd_register_uri_handler(g_web_server, &mqtt_status_uri);
         ESP_LOGI(TAG, "Radar configuration web panel started on port 80!");
     }
 }
@@ -1275,14 +1532,22 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
+        radar_ui_wifi_notify_connecting(g_wifi_ssid);
+        radar_ui_update_wifi_status(WIFI_STATUS_CONNECTING);
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGI(TAG, "Wi-Fi disconnected, retrying connection...");
         esp_wifi_connect();
+        radar_ui_wifi_notify_connecting(g_wifi_ssid);
+        radar_ui_update_wifi_status(WIFI_STATUS_ERROR);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Connected to Wi-Fi. Obtained IP address: " IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         start_web_server();
+        char ip_str[16];
+        snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&event->ip_info.ip));
+        radar_ui_wifi_notify_connected(ip_str);
+        radar_ui_update_wifi_status(WIFI_STATUS_CONNECTED);
     }
 }
 
@@ -1363,6 +1628,8 @@ static void start_ap_mode(void) {
     }
 
     ESP_LOGI(TAG, "SoftAP started: SSID='%s' (no password). Connect and go to http://192.168.4.1/", AP_SSID);
+    radar_ui_wifi_notify_ap_mode(AP_SSID, "");
+    radar_ui_update_wifi_status(WIFI_STATUS_CONNECTING);
     start_web_server();
 }
 
@@ -1390,4 +1657,8 @@ void wifi_manager_init(void) {
 
 void wifi_manager_wait_connected(void) {
     xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+}
+
+bool wifi_mgr_is_connected(void) {
+    return (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) != 0;
 }

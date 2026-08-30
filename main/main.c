@@ -6,6 +6,7 @@
 #include "radar_ui.h"
 #include "photo_service.h"
 #include "map_tile_service.h"
+#include "mqtt_service.h"
 
 void app_main(void) {
     wifi_manager_init();
@@ -23,4 +24,5 @@ void app_main(void) {
 
     adsb_service_start();
     photo_service_start();
+    mqtt_service_start();
 }

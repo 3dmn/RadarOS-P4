@@ -3,6 +3,8 @@
 #include <stdbool.h>
 
 #include "lvgl.h"
+#include "aircraft_types.h"
+#include "mqtt_service.h"
 
 // Allocates the PSRAM buffers needed by UI views (aircraft slots). Call
 // before radar_ui_build(). Returns false if allocation failed.
@@ -27,3 +29,92 @@ void radar_ui_refresh(void);
 // the aircraft type (fallback by ICAO type code), not the specific airframe -
 // photographer then carries the type code instead of a name.
 void radar_ui_set_aircraft_photo(const lv_image_dsc_t *img_dsc, const char *photographer, const char *hex, bool is_type_fallback);
+
+// ================= LIVE CONTROL API =================
+// Shared by the on-screen HUD touch buttons and mqtt_service - both paths
+// converge here so Home Assistant and the touchscreen always agree, and any
+// change (from either source) triggers a display refresh plus an MQTT state
+// publish. Safe to call from any task (internally synchronized with
+// bsp_display_lock(), same as the touch event handlers).
+
+// Jumps the radar scale to the closest supported step to km (see
+// range_steps[] in aircraft_types.h) - not persisted to NVS, matching the
+// existing RNG button behavior (resets to the configured default on reboot).
+void radar_ui_set_range_km(float km);
+float radar_ui_get_range_km(void);
+
+// AIR traffic filter (ALL/CIVIL/MIL) - not persisted to NVS, matching the
+// existing AIR button behavior.
+void radar_ui_set_air_filter(air_filter_mode_t mode);
+air_filter_mode_t radar_ui_get_air_filter(void);
+
+// Ground traffic (GND) visibility - true shows aircraft on the ground, false
+// hides them (matches the on-screen "GND: ON/OFF" label). Not persisted to
+// NVS, matching the existing GND button behavior.
+void radar_ui_set_show_ground(bool show);
+bool radar_ui_get_show_ground(void);
+
+// Nearby-airports overlay (APTS) - not persisted to NVS, matching the
+// existing APTS button behavior.
+void radar_ui_set_airports_enabled(bool on);
+bool radar_ui_get_airports_enabled(void);
+
+// Background tile map layer (MAP) - not persisted to NVS, matching the
+// existing MAP button behavior. Thin wrapper over map_tile_service that also
+// updates the on-screen MAP button style and notifies mqtt_service.
+void radar_ui_set_map_enabled(bool on);
+bool radar_ui_get_map_enabled(void);
+
+// ================= WI-FI STATUS NOTIFICATION =================
+// Overlay card reporting the current Wi-Fi connection state, styled to
+// match the radar cockpit (dark translucent background, rounded corners,
+// neon border). Safe to call from any task, including from wifi_manager's
+// Wi-Fi event handler (not the LVGL task) and even before radar_ui_build()
+// has run - the state is cached and applied once the card widget exists.
+
+// Persistent card shown while the device serves its own SoftAP (setup
+// mode). ap_password may be NULL/empty for an open network.
+void radar_ui_wifi_notify_ap_mode(const char *ap_ssid, const char *ap_password);
+
+// Persistent card shown while attempting to join a saved Wi-Fi network.
+void radar_ui_wifi_notify_connecting(const char *ssid);
+
+// Card shown after obtaining an IP address; auto-hides after ~3.5s.
+void radar_ui_wifi_notify_connected(const char *ip_str);
+
+// ================= MQTT STATUS NOTIFICATION =================
+// Second overlay card (independent of the Wi-Fi one above, positioned below
+// it) reporting the MQTT/Home Assistant broker connection state. The
+// caller (mqtt_service) is only expected to invoke these while MQTT is
+// enabled in the configuration. Safe to call from any task.
+
+// Persistent card shown while attempting to (re)connect to the broker.
+void radar_ui_mqtt_notify_connecting(void);
+
+// Card shown once the broker connection is established; auto-hides after ~3.5s.
+void radar_ui_mqtt_notify_connected(void);
+
+// Card shown on a broker disconnect/error while Wi-Fi itself is still up;
+// auto-hides after ~5s (or sooner, if superseded by a connected/connecting
+// state).
+void radar_ui_mqtt_notify_error(void);
+
+// ================= HUD STATUS BADGE =================
+// Compact, persistent badge in the bottom-left corner of radar_area showing
+// small colored LEDs for Wi-Fi (always) and MQTT (only while enabled).
+// Replaces the old "<> 250 km" range pill - range is already shown by the
+// RNG button (top-right) and the range rings themselves. Safe to call from
+// any task, including before radar_ui_build() has run (the state is cached
+// and applied once the badge widget exists).
+
+typedef enum {
+    WIFI_STATUS_CONNECTED = 0,
+    WIFI_STATUS_CONNECTING, // also used for AP/setup mode
+    WIFI_STATUS_ERROR,      // disconnected / connection failure
+} wifi_status_t;
+
+void radar_ui_update_wifi_status(wifi_status_t status);
+
+// enabled=false hides the MQTT LED entirely (and the badge shrinks to fit
+// just the Wi-Fi indicator); status is only meaningful when enabled=true.
+void radar_ui_update_mqtt_status(bool enabled, mqtt_conn_status_t status);
