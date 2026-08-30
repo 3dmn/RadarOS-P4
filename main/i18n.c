@@ -10,9 +10,9 @@ static const char *s_strings[LANG_COUNT][STR_COUNT] = {
         [STR_CONNECTING_WIFI]   = "CONNECTING WI-FI...",
         [STR_UPDATING_ADSB]     = "UPDATING ADS-B...",
         [STR_NO_TRAFFIC]        = "NO TRAFFIC DETECTED",
-        // Naglowek ruchu celowo identyczny w obu jezykach - standard lotniczy
-        // (TRAFFIC/ALT/SPD/HDG/RNG/AIR/APTS/GND...) zostaje po angielsku w
-        // calym HUD-zie radaru niezaleznie od jezyka UI.
+        // Traffic header deliberately identical in both languages - aviation
+        // standard terms (TRAFFIC/ALT/SPD/HDG/RNG/AIR/APTS/GND...) stay in
+        // English across the whole radar HUD regardless of UI language.
         [STR_TRAFFIC_FMT]       = "TRAFFIC: %d PLANES IN %dKM",
         [STR_WEB_LANGUAGE]      = "Language",
         [STR_WEB_STATION_NAME]  = "Station Name",

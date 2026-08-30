@@ -20,8 +20,8 @@
 #include "map_tile_service.h"
 #include "i18n.h"
 
-// Grafiki wektorowe samolotow - generowane pliki LVGL, kompilowane jako
-// osobne jednostki translacji (main/CMakeLists.txt), tu tylko deklaracje.
+// Vector aircraft graphics - generated LVGL files, compiled as separate
+// translation units (main/CMakeLists.txt), only declared here.
 extern const lv_image_dsc_t aircraft_yellow_15;
 extern const lv_image_dsc_t aircraft_yellow_20;
 extern const lv_image_dsc_t aircraft_yellow_25;
@@ -34,8 +34,8 @@ static air_filter_mode_t air_filter_mode = AIR_FILTER_ALL;
 static bool show_airports = true;
 static bool hide_ground_traffic = true;
 
-// Pula slotow UI dla lotnisk - stala wielkosc niezalezna od rozmiaru globalnej
-// bazy (airports.h), zeby utrzymac 60 FPS przy setkach wpisow w bazie.
+// Pool of airport UI slots - fixed size independent of the global database
+// size (airports.h), to keep 60 FPS with hundreds of database entries.
 #define MAX_VISIBLE_AIRPORTS 40
 
 typedef struct {
@@ -58,9 +58,10 @@ typedef struct {
     lv_obj_t *list_lbl_route;
     lv_obj_t *list_lbl_trend;
 
-    // Wyniki fazy "compute" w radar_ui_refresh() - liczone pod adsb_service_lock,
-    // bez bsp_display_lock (m.in. trygonometria sladu lotu). Stosowane do
-    // obiektow LVGL w krotkiej fazie "apply" pod bsp_display_lock.
+    // Results of the "compute" phase in radar_ui_refresh() - computed under
+    // adsb_service_lock, without bsp_display_lock (incl. flight trail
+    // trigonometry). Applied to LVGL objects in the short "apply" phase
+    // under bsp_display_lock.
     bool     calc_visible;
     bool     calc_vec_visible;
     bool     calc_is_military;
@@ -84,9 +85,9 @@ typedef struct {
 } AircraftSlotUI;
 
 static AircraftSlotUI *ui_slots = NULL;
-// Serializuje wywolania radar_ui_refresh() z roznych taskow (adsb_worker
-// oraz handlery klikniec w tasku LVGL), bo obie fazy pisza do wspolnych
-// buforow scratch w ui_slots.
+// Serializes radar_ui_refresh() calls from different tasks (adsb_worker and
+// click handlers in the LVGL task), because both phases write to shared
+// scratch buffers in ui_slots.
 static SemaphoreHandle_t g_refresh_serialize_mutex = NULL;
 
 static lv_obj_t *radar_area;
@@ -120,8 +121,8 @@ static lv_obj_t *banner_alert;
 static lv_obj_t *banner_lbl;
 static bool banner_visible_prev = false;
 
-// Priorytet kodow awaryjnych squawk: 7500 (uprowadzenie) > 7700 (zagrozenie
-// ogolne) > 7600 (utrata lacznosci). Zwraca 0, gdy kod nie jest awaryjny.
+// Emergency squawk code priority: 7500 (hijack) > 7700 (general emergency) >
+// 7600 (radio failure). Returns 0 when the code is not an emergency.
 static int squawk_emergency_rank(const char *squawk, const char **out_label) {
     if (!squawk) return 0;
     if (strcmp(squawk, "7500") == 0) { if (out_label) *out_label = "HIJACK"; return 3; }
@@ -152,9 +153,9 @@ static void stop_banner_pulse(lv_obj_t *obj) {
     lv_obj_set_style_bg_color(obj, lv_color_hex(0x990000), 0);
 }
 
-// Zdjecie samolotu z Planespotters.net (photo_service) - bufor RGB565 w PSRAM,
-// wlasnosc radar_ui. popup_photo_hex sledzi, dla ktorego hex zostalo zadane/
-// zaladowane, zeby nie wysylac zapytania ponownie co kazdy radar_ui_refresh().
+// Aircraft photo from Planespotters.net (photo_service) - RGB565 buffer in
+// PSRAM, owned by radar_ui. popup_photo_hex tracks which hex it was
+// requested/loaded for, so it isn't re-requested on every radar_ui_refresh().
 static const lv_image_dsc_t *popup_photo_dsc = NULL;
 static char popup_photo_hex[8] = "";
 
@@ -166,8 +167,8 @@ static void popup_photo_release(void) {
     }
 }
 
-// Pulsujacy (migajacy) tekst statusu "POBIERANIE ZDJECIA..." w kolorze
-// zoltym, na czas trwania zapytania do photo_service.
+// Pulsing (blinking) "FETCHING PHOTO..." status text in yellow, for the
+// duration of the photo_service request.
 static void loading_pulse_anim_cb(void *obj, int32_t v) {
     lv_obj_set_style_text_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
 }
@@ -202,7 +203,7 @@ static inline void lv_obj_set_hidden(lv_obj_t *obj, bool hidden) {
     else lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
 }
 
-// Kontrastowy niebieski dla helikopterow LPR (Lotnicze Pogotowie Ratunkowe)
+// High-contrast blue for LPR (Polish Medical Air Rescue) helicopters
 #define COLOR_LPR lv_color_hex(0x0096FF)
 
 static bool is_lpr_callsign(const char *callsign) {
@@ -224,13 +225,13 @@ static const lv_image_dsc_t* get_aircraft_dsc(AircraftType type) {
     return &aircraft_yellow_20;
 }
 
-// ================= AKTUALIZACJA UI SAMOLOTOW =================
+// ================= AIRCRAFT UI UPDATE =================
 void radar_ui_refresh(void) {
     if (!live_fleet || !ui_slots || !g_refresh_serialize_mutex) return;
-    // Ograniczony timeout (nie portMAX_DELAY): radar_ui_refresh() bywa wywolywane
-    // takze z handlerow klikniec w tasku LVGL, ktory w tym momencie juz trzyma
-    // lvgl_mux - blokada bez limitu tutaj mogla by go zawiesic na czas trwania
-    // rownoleglego refresh z adsb_worker_task.
+    // Bounded timeout (not portMAX_DELAY): radar_ui_refresh() is also called
+    // from click handlers in the LVGL task, which already holds lvgl_mux at
+    // that point - an unbounded wait here could stall it for the duration of
+    // a concurrent refresh from adsb_worker_task.
     if (xSemaphoreTake(g_refresh_serialize_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
 
     if (!adsb_service_lock(100)) {
@@ -249,12 +250,12 @@ void radar_ui_refresh(void) {
     int list_y_offset = 0;
     AircraftData *selected_ac = NULL;
 
-    // ---- Faza "compute": trygonometria i dane etykiet, tylko adsb_service_lock,
-    // bez bsp_display_lock - zeby jak najkrocej trzymac mutex LVGL. Petla idzie
-    // po calej statycznej pojemnosci buforow (MAX_AIRCRAFT_CAPACITY), ale
-    // sloty >= max_aircraft sa od razu odrzucane (is_valid=false), zeby faza
-    // "apply" ponizej mogla je poprawnie ukryc, gdy limit zostal zmniejszony
-    // od ostatniego odswiezenia. ----
+    // ---- "compute" phase: trigonometry and label data, only under
+    // adsb_service_lock, without bsp_display_lock - to hold the LVGL mutex
+    // for as short as possible. The loop runs over the full static buffer
+    // capacity (MAX_AIRCRAFT_CAPACITY), but slots >= max_aircraft are
+    // immediately rejected (is_valid=false), so the "apply" phase below can
+    // correctly hide them if the limit was lowered since the last refresh. ----
     for(int i = 0; i < MAX_AIRCRAFT_CAPACITY; i++) {
         bool is_valid = (i < max_aircraft) && live_fleet[i].active && ((now - live_fleet[i].last_seen_ms) < PLANE_TIMEOUT_MS);
         if (hide_ground_traffic && live_fleet[i].on_ground) is_valid = false;
@@ -300,14 +301,14 @@ void radar_ui_refresh(void) {
             ui_slots[i].calc_list_y = list_y_offset;
             list_y_offset += 65;
 
-            // Wektor sladu lotu - liczba punktow ograniczona przez trail_len
-            // z NVS (panel WWW). trail_len==0 -> slad calkowicie wylaczony.
+            // Flight trail vector - point count capped by trail_len from NVS
+            // (web panel). trail_len==0 -> trail fully disabled.
             AircraftTrackHistory *th = (trail_len > 0) ? find_aircraft_track(live_fleet[i].hex) : NULL;
             if(th && th->pt_count >= 1) {
                 int cap = trail_len;
                 if (cap > MAX_TRACK_POINTS) cap = MAX_TRACK_POINTS;
                 int pts_to_draw = th->pt_count > cap ? cap : th->pt_count;
-                int start_idx = th->pt_count - pts_to_draw; // najnowsze pts_to_draw punktow
+                int start_idx = th->pt_count - pts_to_draw; // most recent pts_to_draw points
                 for(int p = 0; p < pts_to_draw; p++) {
                     float p_dist, p_bear;
                     calculate_coords(th->lats[start_idx + p], th->lons[start_idx + p], &p_dist, &p_bear);
@@ -327,8 +328,8 @@ void radar_ui_refresh(void) {
         }
     }
 
-    // Alarm squawk awaryjny - niezalezny od filtrow AIR/GND/zasiegu, liczony
-    // po calej flocie aktywnych samolotow.
+    // Emergency squawk alert - independent of the AIR/GND/range filters,
+    // computed over the whole fleet of active aircraft.
     bool emg_active = false;
     int emg_rank = 0;
     const char *emg_label = "";
@@ -380,18 +381,19 @@ void radar_ui_refresh(void) {
 
     adsb_service_unlock();
 
-    // ---- Faza "apply": tylko settery LVGL na gotowych danych, krotki bsp_display_lock. ----
+    // ---- "apply" phase: only LVGL setters on ready data, short bsp_display_lock. ----
     if (!bsp_display_lock(200)) {
-        ESP_LOGW(TAG, "radar_ui_refresh: timeout bsp_display_lock, pomijam klatke");
+        ESP_LOGW(TAG, "radar_ui_refresh: bsp_display_lock timeout, skipping frame");
         xSemaphoreGive(g_refresh_serialize_mutex);
         return;
     }
 
-    // Pozycjonowanie lotnisk: najpierw szybki filtr bounding-box (odchylka
-    // lat/lon wyliczona z biezacego promienia radaru), dopiero dla kandydatow
-    // liczymy dokladny dystans/bearing i pikselowa pozycje. Dzieki temu
-    // globalna baza lotnisk (airports.h) nie obciaza renderu - rysujemy co
-    // najwyzej MAX_VISIBLE_AIRPORTS obiektow, wylacznie w zasiegu radaru.
+    // Airport positioning: first a fast bounding-box filter (lat/lon
+    // deviation computed from the current radar range), only then do
+    // candidates get an exact distance/bearing and pixel position
+    // computed. This way the global airport database (airports.h) doesn't
+    // weigh down rendering - we draw at most MAX_VISIBLE_AIRPORTS objects,
+    // strictly within radar range.
     int airport_slot = 0;
     if (show_airports) {
         uint8_t apt_mask = wifi_mgr_get_apt_filter_mask();
@@ -548,7 +550,7 @@ void radar_ui_refresh(void) {
     xSemaphoreGive(g_refresh_serialize_mutex);
 }
 
-// ================= ZDARZENIA PRZYCISKOW =================
+// ================= BUTTON EVENTS =================
 static void switch_range(void) {
     current_range_idx = (current_range_idx + 1) % NUM_RANGE_STEPS;
     float current_range = range_steps[current_range_idx];
@@ -686,7 +688,7 @@ static void aircraft_click_event_cb(lv_event_t *e) {
 
 void radar_ui_set_aircraft_photo(const lv_image_dsc_t *img_dsc, const char *photographer, const char *hex, bool is_type_fallback) {
     if (!bsp_display_lock(500)) {
-        ESP_LOGW(TAG, "radar_ui_set_aircraft_photo: timeout bsp_display_lock, odrzucam wynik");
+        ESP_LOGW(TAG, "radar_ui_set_aircraft_photo: bsp_display_lock timeout, discarding result");
         if (img_dsc) {
             heap_caps_free((void *)img_dsc->data);
             heap_caps_free((void *)img_dsc);
@@ -694,8 +696,8 @@ void radar_ui_set_aircraft_photo(const lv_image_dsc_t *img_dsc, const char *phot
         return;
     }
 
-    // Uzytkownik zdazyl zamknac popup albo wybrac inny samolot zanim zdjecie
-    // sie pobralo - wynik jest juz nieaktualny.
+    // The user already closed the popup or selected another aircraft before
+    // the photo finished fetching - the result is now stale.
     if (strcmp(popup_photo_hex, hex) != 0) {
         bsp_display_unlock();
         if (img_dsc) {
@@ -711,9 +713,9 @@ void radar_ui_set_aircraft_photo(const lv_image_dsc_t *img_dsc, const char *phot
     if (img_dsc) {
         popup_photo_dsc = img_dsc;
 
-        // Kadrowanie "cover" na wzor FR24 - zdjecie wypelnia caly kafelek
-        // (300x165, wewnatrz paddingu ~292x157), popup_top_box przycina
-        // nadmiar poza wlasnymi granicami.
+        // FR24-style "cover" cropping - the photo fills the whole tile
+        // (300x165, ~292x157 inside padding), popup_top_box clips
+        // anything beyond its own bounds.
         int target_w = 292, target_h = 157;
         uint32_t scale_w = (uint32_t)target_w * 256 / img_dsc->header.w;
         uint32_t scale_h = (uint32_t)target_h * 256 / img_dsc->header.h;
@@ -724,9 +726,9 @@ void radar_ui_set_aircraft_photo(const lv_image_dsc_t *img_dsc, const char *phot
         lv_image_set_rotation(popup_img_preview, 0);
 
         if (is_type_fallback && photographer && photographer[0]) {
-            // Zdjecie poglądowe danego typu (fallback po ICAO type code, nie
-            // konkretnego egzemplarza) - photo_service juz sklada pelny
-            // podpis "[Model] <kod>", tu tylko go wyswietlamy.
+            // Representative photo for the aircraft type (fallback by ICAO
+            // type code, not the specific airframe) - photo_service already
+            // builds the full "[Model] <code>" caption, we just display it here.
             lv_label_set_text(popup_lbl_credit, photographer);
         } else if (photographer && photographer[0]) {
             lv_label_set_text_fmt(popup_lbl_credit, "(c) %s", photographer);
@@ -765,16 +767,16 @@ static void create_radar_circle(lv_obj_t *parent, int radius) {
     lv_obj_clear_flag(circ, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 }
 
-// ================= BUDOWA STRUKTURY LVGL =================
+// ================= LVGL STRUCTURE BUILD =================
 bool radar_ui_init(void) {
     ui_slots = (AircraftSlotUI *)heap_caps_calloc(MAX_AIRCRAFT_CAPACITY, sizeof(AircraftSlotUI), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!ui_slots) {
-        ESP_LOGE(TAG, "Nie udalo sie zaalokowac pamieci slotow UI w PSRAM!");
+        ESP_LOGE(TAG, "Failed to allocate UI slot memory in PSRAM!");
         return false;
     }
     g_refresh_serialize_mutex = xSemaphoreCreateMutex();
     if (!g_refresh_serialize_mutex) {
-        ESP_LOGE(TAG, "Nie udalo sie utworzyc g_refresh_serialize_mutex!");
+        ESP_LOGE(TAG, "Failed to create g_refresh_serialize_mutex!");
         return false;
     }
 
@@ -1090,9 +1092,9 @@ void radar_ui_build(void) {
     lv_image_set_inner_align(popup_img_preview, LV_IMAGE_ALIGN_CENTER);
     lv_obj_align(popup_img_preview, LV_ALIGN_CENTER, 0, 0);
 
-    // Etykieta autora zdjecia (styl FR24) - polprzezroczysta plakietka w lewym
-    // dolnym rogu kafelka ze zdjeciem; w trakcie ladowania/braku zdjecia
-    // wyswietla tez status.
+    // Photo credit label (FR24-style) - semi-transparent badge in the
+    // bottom-left corner of the photo tile; also shows status while
+    // loading/when there is no photo.
     popup_lbl_credit = lv_label_create(popup_top_box);
     lv_label_set_text(popup_lbl_credit, "RADAR STATION FEED");
     lv_obj_set_style_text_color(popup_lbl_credit, lv_color_hex(0xCCCCCC), 0);
@@ -1134,8 +1136,8 @@ void radar_ui_build(void) {
     lv_obj_set_style_text_color(popup_lbl_route, lv_color_hex(0x00e575), 0);
     lv_obj_align(popup_lbl_route, LV_ALIGN_BOTTOM_LEFT, 5, -2);
 
-    // Baner alarmowy squawk (7700/7600/7500) - dziecko scr (nie radar_area),
-    // tworzony na koncu zeby byc rysowany na wierzchu calego ekranu.
+    // Squawk alert banner (7700/7600/7500) - child of scr (not radar_area),
+    // created last so it renders on top of the whole screen.
     banner_alert = lv_obj_create(scr);
     lv_obj_set_size(banner_alert, SCREEN_WIDTH, 32);
     lv_obj_set_pos(banner_alert, 0, 0);

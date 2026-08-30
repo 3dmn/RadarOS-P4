@@ -4,9 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define APT_TYPE_CIVIL (1 << 0) // Komunikacyjne / Glowne pasazerskie (Commercial / Hubs)
-#define APT_TYPE_MIL   (1 << 1) // Bazy wojskowe (Air Bases / Military)
-#define APT_TYPE_GA    (1 << 2) // Aerokluby, male lotniska i ladowiska (General Aviation / Regional)
+#define APT_TYPE_CIVIL (1 << 0) // Commercial / major passenger hubs
+#define APT_TYPE_MIL   (1 << 1) // Air bases / military
+#define APT_TYPE_GA    (1 << 2) // Aeroclubs, small airfields and airstrips (General Aviation / Regional)
 #define APT_TYPE_ALL   (APT_TYPE_CIVIL | APT_TYPE_MIL | APT_TYPE_GA)
 
 typedef struct {

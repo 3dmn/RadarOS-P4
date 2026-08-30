@@ -16,53 +16,54 @@ extern char g_station_name[STATION_NAME_LEN];
 extern char g_wifi_ssid[WIFI_SSID_MAX_LEN];
 extern char g_wifi_pass[WIFI_PASS_MAX_LEN];
 
-// Inicjalizuje NVS, wczytuje zapisana konfiguracje, probuje polaczyc sie
-// z Wi-Fi w trybie STA (timeout). Jesli sie nie uda - uruchamia SoftAP
-// "RadarADSB-Setup" wraz z panelem WWW konfiguracji (port 80).
+// Initializes NVS, loads the saved configuration, tries to connect to Wi-Fi
+// in STA mode (with a timeout). On failure, starts the "RadarADSB-Setup"
+// SoftAP along with the web configuration panel (port 80).
 void wifi_manager_init(void);
 
-// Blokuje wywolujacy task do czasu uzyskania polaczenia Wi-Fi (WIFI_CONNECTED_BIT).
+// Blocks the calling task until a Wi-Fi connection is established
+// (WIFI_CONNECTED_BIT).
 void wifi_manager_wait_connected(void);
 
-// Jasnosc ekranu z NVS, zakres 10-100%.
+// Screen brightness from NVS, range 10-100%.
 uint8_t wifi_mgr_get_brightness(void);
 
-// Domyslny startowy zasieg (RNG) w km z NVS.
+// Default startup range (RNG) in km from NVS.
 int wifi_mgr_get_default_range(void);
 
-// Domyslny tryb filtru AIR z NVS (0 = ALL, 1 = CIVIL, 2 = MIL).
+// Default AIR filter mode from NVS (0 = ALL, 1 = CIVIL, 2 = MIL).
 uint8_t wifi_mgr_get_default_air_mode(void);
 
-// Domyslny stan wyswietlania lotnisk z NVS (1 = ON, 0 = OFF).
+// Default airport display state from NVS (1 = ON, 0 = OFF).
 uint8_t wifi_mgr_get_default_apts_mode(void);
 
-// Maska typow lotnisk widocznych na radarze z NVS (bity APT_TYPE_* z
-// airports.h). Domyslnie wszystkie typy wlaczone.
+// Mask of airport types shown on the radar, from NVS (APT_TYPE_* bits from
+// airports.h). All types enabled by default.
 uint8_t wifi_mgr_get_apt_filter_mask(void);
 
-// Czy domyslnie ukrywac ruch naziemny (samoloty on_ground) z NVS.
+// Whether to hide ground traffic (on_ground aircraft) by default, from NVS.
 bool wifi_mgr_get_hide_ground(void);
 
-// Czy domyslnie wyswietlac warstwe mapy w tle radaru (MAP) z NVS.
+// Whether to show the background map layer (MAP) by default, from NVS.
 bool wifi_mgr_get_map_enabled(void);
 
-// Czy pokazywac pulsujacy baner alarmowy przy wykryciu kodu awaryjnego
-// squawk (7700/7600/7500) z NVS.
+// Whether to show the pulsing alert banner when an emergency squawk code
+// (7700/7600/7500) is detected, from NVS.
 bool wifi_mgr_get_squawk_alert_enabled(void);
 
-// Dlugosc sladu lotu (liczba punktow historii trasy rysowanych za
-// samolotem) z NVS. 0 = slad wylaczony. Dozwolone wartosci: 0/15/30/60/120.
+// Flight trail length (number of track-history points drawn behind an
+// aircraft) from NVS. 0 = trail disabled. Allowed values: 0/15/30/60/120.
 uint8_t wifi_mgr_get_trail_len(void);
 void wifi_mgr_set_trail_len(uint8_t len);
 
-// Maksymalna liczba jednoczesnie parsowanych/wyswietlanych samolotow z NVS
-// (10-200, twardy limit sprzetowy MAX_AIRCRAFT_CAPACITY to 200).
+// Maximum number of simultaneously parsed/displayed aircraft from NVS
+// (10-200; the hard hardware limit MAX_AIRCRAFT_CAPACITY is 200).
 uint16_t wifi_mgr_get_max_aircraft(void);
 void wifi_mgr_set_max_aircraft(uint16_t max_val);
 
-// Aktywny jezyk interfejsu (LCD + panel WWW) z NVS.
+// Active UI language (LCD + web panel) from NVS.
 app_lang_t wifi_mgr_get_lang(void);
 
-// Ustawia jezyk w pamieci (i synchronizuje i18n_set_lang()) - nie zapisuje
-// samo w sobie do NVS, to robi save_settings_to_nvs() w panelu WWW.
+// Sets the language in memory (and syncs i18n_set_lang()) - does not save to
+// NVS by itself; that's done by save_settings_to_nvs() in the web panel.
 void wifi_mgr_set_lang(app_lang_t lang);

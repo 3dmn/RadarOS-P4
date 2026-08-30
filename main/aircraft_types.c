@@ -3,9 +3,9 @@
 
 #include "aircraft_types.h"
 
-// Kody typow ICAO ("t" w danych ADS-B) rozpoznawane jako smiglowiec -
-// dopasowanie dokladne (nie substring), bo to sa oficjalne, krotkie
-// designatory typu (np. "R44", "H60"), a nie fragmenty nazw.
+// ICAO type codes ("t" in ADS-B data) recognized as a helicopter - exact
+// match (not substring), since these are official, short type designators
+// (e.g. "R44", "H60"), not name fragments.
 static const char *s_helicopter_types[] = {
     // Airbus / Eurocopter
     "AS50", "AS55", "AS32", "AS35", "AS65",
@@ -21,7 +21,7 @@ static const char *s_helicopter_types[] = {
     "W3", "SW4", "MI2", "MI8", "MI14", "MI17", "MI24", "MI28", "KA52",
     // Sikorsky
     "H60", "UH60", "S70", "S76", "S92", "H53",
-    // Inne cywilne
+    // Other civilian
     "CABR", "G2CA", "H269", "S300", "B063", "MD52", "MD50", "MD60",
 };
 #define NUM_HELICOPTER_TYPES (sizeof(s_helicopter_types) / sizeof(s_helicopter_types[0]))

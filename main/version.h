@@ -1,9 +1,9 @@
 #ifndef VERSION_H
 #define VERSION_H
 
-// Oficjalna nazwa i wersja firmware - jedyne miejsce, ktore trzeba zmienic
-// przy wydaniu nowej wersji. Numer kompilacji/commit i wersja ESP-IDF sa
-// doklejane automatycznie w wifi_manager.c z esp_app_get_description().
+// Official firmware name and version - the only place that needs to change
+// on a new release. The build/commit number and ESP-IDF version are appended
+// automatically in wifi_manager.c from esp_app_get_description().
 #define FW_NAME    "RadarOS P4"
 #define FW_VERSION "v1.1.0"
 

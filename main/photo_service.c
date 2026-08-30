@@ -14,9 +14,9 @@
 
 #include "lvgl.h"
 
-// stb_image alokuje w PSRAM (obrazki JPEG nie mieszcza sie sensownie w DRAM).
-// free() dziala tu poprawnie dla wskaznikow z heap_caps_malloc - w ESP-IDF
-// standardowy alokator libc i heap_caps dziela ten sam multi_heap.
+// stb_image allocates in PSRAM (JPEG images don't reasonably fit in DRAM).
+// free() works correctly here for pointers from heap_caps_malloc - in
+// ESP-IDF the standard libc allocator and heap_caps share the same multi_heap.
 #define STBI_MALLOC(sz)           heap_caps_malloc(sz, MALLOC_CAP_SPIRAM)
 #define STBI_REALLOC(p, newsz)    heap_caps_realloc(p, newsz, MALLOC_CAP_SPIRAM)
 #define STBI_FREE(p)              free(p)
@@ -68,7 +68,7 @@ static bool http_get_to_buffer_ua(const char *url, uint8_t *buf, int buf_size, i
         esp_http_client_close(client);
         ESP_LOGI(TAG, "HTTP GET %s -> status %d, %d B", url, *out_status, total);
     } else {
-        ESP_LOGW(TAG, "HTTP open blad: %s (%s)", esp_err_to_name(err), url);
+        ESP_LOGW(TAG, "HTTP open failed: %s (%s)", esp_err_to_name(err), url);
     }
     esp_http_client_cleanup(client);
     return ok;
@@ -78,9 +78,9 @@ static bool http_get_to_buffer(const char *url, uint8_t *buf, int buf_size, int 
     return http_get_to_buffer_ua(url, buf, buf_size, out_len, out_status, PHOTO_HTTP_USER_AGENT);
 }
 
-// Wyciaga pojedyncze pole tekstowe "key":"value" bez pelnego parsera JSON -
-// spojne z podejsciem w adsb_service.c (parse_adsb_json). Odwraca ucieczki
-// "\/" -> "/" ktore niektore serwery wstawiaja w URL-ach.
+// Extracts a single "key":"value" text field without a full JSON parser -
+// consistent with the approach in adsb_service.c (parse_adsb_json). Reverses
+// "\/" -> "/" escapes that some servers insert into URLs.
 static bool extract_string_field(const char *json, const char *key, char *out, size_t out_size) {
     const char *p = strstr(json, key);
     if (!p) return false;
@@ -108,8 +108,8 @@ static bool extract_photo_url(const char *json, char *url_out, size_t url_out_si
     return extract_string_field(json, "\"thumbnail\":{\"src\":\"", url_out, url_out_size);
 }
 
-// KROK 1/2 lancucha fallback: Planespotters.net po hex lub po rejestracji
-// (ten sam format odpowiedzi JSON dla obu endpointow).
+// STEP 1/2 of the fallback chain: Planespotters.net by hex or by
+// registration (same JSON response format for both endpoints).
 static bool fetch_planespotters(const char *url, char *photo_url_out, size_t photo_url_size,
                                  char *photographer_out, size_t photographer_size) {
     uint8_t *json_buf = heap_caps_malloc(PHOTO_JSON_BUF_SIZE, MALLOC_CAP_SPIRAM);
@@ -126,16 +126,16 @@ static bool fetch_planespotters(const char *url, char *photo_url_out, size_t pho
     heap_caps_free(json_buf);
 
     if (have_url) {
-        ESP_LOGI(TAG, "Planespotters: znaleziono zdjecie -> %s", photo_url_out);
+        ESP_LOGI(TAG, "Planespotters: photo found -> %s", photo_url_out);
     } else {
-        ESP_LOGI(TAG, "Planespotters: brak zdjecia (%s, status %d)", url, status);
+        ESP_LOGI(TAG, "Planespotters: no photo (%s, status %d)", url, status);
     }
     return have_url;
 }
 
-// KROK 3 lancucha fallback: Airport-Data.com (baza zapasowa, gdy Planespotters
-// nie ma zdjecia ani po hex, ani po rejestracji). param_key to "m" (hex) albo
-// "r" (rejestracja) - zgodnie z API airport-data.com.
+// STEP 3 of the fallback chain: Airport-Data.com (backup source when
+// Planespotters has no photo by hex or by registration). param_key is "m"
+// (hex) or "r" (registration) - matching the airport-data.com API.
 static bool fetch_airport_data(const char *param_key, const char *param_value,
                                 char *photo_url_out, size_t photo_url_size,
                                 char *photographer_out, size_t photographer_size) {
@@ -162,18 +162,18 @@ static bool fetch_airport_data(const char *param_key, const char *param_value,
     heap_caps_free(json_buf);
 
     if (have_url) {
-        ESP_LOGI(TAG, "Airport-Data: znaleziono zdjecie -> %s", photo_url_out);
+        ESP_LOGI(TAG, "Airport-Data: photo found -> %s", photo_url_out);
     } else {
-        ESP_LOGI(TAG, "Airport-Data: brak zdjecia (%s, status %d)", url, status);
+        ESP_LOGI(TAG, "Airport-Data: no photo (%s, status %d)", url, status);
     }
     return have_url;
 }
 
-// KROK 4 lancucha fallback (zdjecie poglądowe typu, nie konkretnego
-// egzemplarza): mapuje najczestsze kody ICAO na dokladny tytul artykulu
-// Wikipedii, uzywany bezposrednio z REST Summary API (bez zgadywania przez
-// wyszukiwarke). Kody spoza tabeli spadaja na sam type_code jako tytul -
-// dziala tylko jesli przypadkiem odpowiada prawdziwej stronie.
+// STEP 4 of the fallback chain (a representative photo for the type, not the
+// specific airframe): maps common ICAO codes to the exact Wikipedia article
+// title, used directly with the REST Summary API (no search-engine
+// guessing). Codes outside the table fall back to the type_code itself as
+// the title - only works if it happens to match a real page.
 typedef struct {
     const char *icao;
     const char *wiki_title;
@@ -225,9 +225,10 @@ static const char *lookup_wiki_title(const char *type_code) {
     return type_code;
 }
 
-// Procent-koduje tytul strony do URL (w tym bajty UTF-8 spoza ASCII, np. w
-// "Écureuil") - MediaWiki oczekuje podkreslen zamiast spacji (juz w tabeli),
-// wiec kodujemy tylko znaki spoza bezpiecznego zbioru.
+// Percent-encodes the page title for the URL (including non-ASCII UTF-8
+// bytes, e.g. in "Écureuil") - MediaWiki expects underscores instead of
+// spaces (already handled in the table), so we only encode characters
+// outside the safe set.
 static void url_encode_title(const char *title, char *out, size_t out_size) {
     static const char hex[] = "0123456789ABCDEF";
     size_t o = 0;
@@ -248,8 +249,8 @@ static void url_encode_title(const char *title, char *out, size_t out_size) {
 
 #define WIKIPEDIA_USER_AGENT "RadarADSB/1.0 (ESP32-P4 Flight Radar; https://github.com/espressif)"
 
-// REST Summary API - zwraca metadane strony (w tym "thumbnail":{"source":...})
-// dla dokladnego tytulu, bez potrzeby wyszukiwania.
+// REST Summary API - returns page metadata (including
+// "thumbnail":{"source":...}) for the exact title, no search needed.
 static bool fetch_wikipedia_type_photo(const char *type_code, char *photo_url_out, size_t photo_url_size) {
     const char *wiki_title = lookup_wiki_title(type_code);
 
@@ -271,17 +272,17 @@ static bool fetch_wikipedia_type_photo(const char *type_code, char *photo_url_ou
     heap_caps_free(json_buf);
 
     if (have_url) {
-        ESP_LOGI(TAG, "Wikipedia REST: znaleziono zdjecie typu %s (%s) -> %s", type_code, wiki_title, photo_url_out);
+        ESP_LOGI(TAG, "Wikipedia REST: found photo for type %s (%s) -> %s", type_code, wiki_title, photo_url_out);
     } else {
-        ESP_LOGI(TAG, "Wikipedia REST: brak miniatury dla typu %s (%s), status %d", type_code, wiki_title, status);
+        ESP_LOGI(TAG, "Wikipedia REST: no thumbnail for type %s (%s), status %d", type_code, wiki_title, status);
     }
     return have_url;
 }
 
-// Dekoduje JPEG (rowniez progresywny - obslugiwany natywnie przez stb_image)
-// do bufora RGB565 w PSRAM, rozmiaru dopasowanego do faktycznych wymiarow
-// obrazka. Bufor posredni RGB888 od stbi_load_from_memory jest zwalniany
-// od razu po konwersji.
+// Decodes JPEG (including progressive - handled natively by stb_image) into
+// an RGB565 buffer in PSRAM, sized to the image's actual dimensions. The
+// intermediate RGB888 buffer from stbi_load_from_memory is freed right
+// after conversion.
 static lv_image_dsc_t *decode_jpeg(const uint8_t *jpeg_buf, size_t jpeg_len) {
     int w = 0, h = 0, src_channels = 0;
     stbi_set_flip_vertically_on_load(0);
@@ -300,7 +301,7 @@ static lv_image_dsc_t *decode_jpeg(const uint8_t *jpeg_buf, size_t jpeg_len) {
 
     uint16_t *dst = (uint16_t *)pixel_buf;
     for (int y = 0; y < h; y++) {
-        int src_y = (h - 1) - y; // pobieranie wiersza od dolu do gory (Flip Y)
+        int src_y = (h - 1) - y; // read rows bottom-to-top (flip Y)
         const unsigned char *src_row = rgb_data + (size_t)src_y * w * 3;
         uint16_t *dst_row = dst + (size_t)y * w;
         for (int x = 0; x < w; x++) {
@@ -333,9 +334,9 @@ typedef struct {
     char type_code[8];
 } photo_request_t;
 
-// Lancuch fallback: Planespotters/hex -> Planespotters/reg -> Airport-Data.com
-// -> Wikipedia (zdjecie poglądowe typu). Zatrzymuje sie na pierwszym zrodle,
-// ktore zwroci URL zdjecia.
+// Fallback chain: Planespotters/hex -> Planespotters/reg -> Airport-Data.com
+// -> Wikipedia (representative photo of the type). Stops at the first
+// source that returns a photo URL.
 static void process_request(const char *hex, const char *reg, const char *type_code) {
     char photo_url[256] = "";
     char photographer[64] = "";
@@ -369,7 +370,7 @@ static void process_request(const char *hex, const char *reg, const char *type_c
     }
 
     if (!have_url) {
-        ESP_LOGI(TAG, "Brak zdjecia w zadnej bazie dla hex=%s reg=%s type=%s",
+        ESP_LOGI(TAG, "No photo in any database for hex=%s reg=%s type=%s",
                  hex, have_reg ? reg : "-", have_type ? type_code : "-");
         radar_ui_set_aircraft_photo(NULL, NULL, hex, false);
         return;
@@ -384,7 +385,7 @@ static void process_request(const char *hex, const char *reg, const char *type_c
     int jpeg_len = 0, status = 0;
     bool ok = http_get_to_buffer(photo_url, jpeg_buf, PHOTO_JPEG_BUF_SIZE, &jpeg_len, &status);
     if (!ok || jpeg_len <= 0) {
-        ESP_LOGW(TAG, "Pobranie JPEG nieudane dla %s (status %d)", hex, status);
+        ESP_LOGW(TAG, "JPEG fetch failed for %s (status %d)", hex, status);
         heap_caps_free(jpeg_buf);
         radar_ui_set_aircraft_photo(NULL, NULL, hex, false);
         return;
@@ -394,12 +395,12 @@ static void process_request(const char *hex, const char *reg, const char *type_c
     heap_caps_free(jpeg_buf);
 
     if (!dsc) {
-        ESP_LOGW(TAG, "Dekodowanie JPEG nieudane dla %s", hex);
+        ESP_LOGW(TAG, "JPEG decode failed for %s", hex);
         radar_ui_set_aircraft_photo(NULL, NULL, hex, false);
         return;
     }
 
-    ESP_LOGI(TAG, "Zdjecie %s zdekodowane: %" PRIu32 "x%" PRIu32, hex, dsc->header.w, dsc->header.h);
+    ESP_LOGI(TAG, "Photo %s decoded: %" PRIu32 "x%" PRIu32, hex, dsc->header.w, dsc->header.h);
     radar_ui_set_aircraft_photo(dsc, photographer, hex, is_type_fallback);
 }
 

@@ -5,20 +5,21 @@
 
 #include "aircraft_types.h"
 
-// Flota samolotow aktualnie widocznych w zasiegu - wlasnosc adsb_service,
-// odczyt z zewnatrz (UI) dozwolony wylacznie pod adsb_service_lock()/unlock().
+// Fleet of aircraft currently visible in range - owned by adsb_service,
+// external (UI) reads only allowed under adsb_service_lock()/unlock().
 extern AircraftData *live_fleet;
 extern int total_aircraft_in_zone;
 
-// Alokuje bufory PSRAM (live_fleet/temp_fleet/track_db) i tworzy g_data_mutex.
-// Zwraca false, jesli alokacja sie nie powiodla (aplikacja powinna przerwac start).
+// Allocates PSRAM buffers (live_fleet/temp_fleet/track_db) and creates
+// g_data_mutex. Returns false if allocation failed (the app should abort
+// startup).
 bool adsb_service_init(void);
 
-// Uruchamia task FreeRTOS cyklicznie odpytujacy adsb.fi / airplanes.live.
+// Starts the FreeRTOS task that cyclically polls adsb.fi / airplanes.live.
 void adsb_service_start(void);
 
-// Muteks chroniacy live_fleet/total_aircraft_in_zone. Timeout w ms; przy
-// przekroczeniu loguje ostrzezenie (ESP_LOGW) i zwraca false.
+// Mutex protecting live_fleet/total_aircraft_in_zone. Timeout in ms; logs a
+// warning (ESP_LOGW) and returns false if it expires.
 bool adsb_service_lock(uint32_t timeout_ms);
 void adsb_service_unlock(void);
 

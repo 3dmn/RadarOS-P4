@@ -3,21 +3,21 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Sprawdza, czy kod typu ICAO (pole "t" z ADS-B, np. "EC35", "H125", "R44")
-// odpowiada smiglowcowi - pelna baza kodow w aircraft_types.c.
+// Checks whether an ICAO type code (ADS-B "t" field, e.g. "EC35", "H125",
+// "R44") corresponds to a helicopter - full code table in aircraft_types.c.
 bool is_helicopter(const char *type);
 
-// ================= KONFIGURACJA RADARU I SIECI =================
-// Twardy, statyczny rozmiar buforow (live_fleet/temp_fleet/ui_slots) w PSRAM.
-// Realnie parsowana/wyswietlana liczba samolotow jest dodatkowo ograniczana
-// w locie przez wifi_mgr_get_max_aircraft() (NVS/panel WWW, 10-200).
+// ================= RADAR & NETWORK CONFIGURATION =================
+// Hard, static size of the buffers (live_fleet/temp_fleet/ui_slots) in PSRAM.
+// The actually parsed/displayed aircraft count is further capped at runtime
+// by wifi_mgr_get_max_aircraft() (NVS/web panel, 10-200).
 #define MAX_AIRCRAFT_CAPACITY    200
 #define MAX_SEEN_DB              512
-// Gorny limit dlugosci sladu lotu - realnie wyswietlana liczba punktow jest
-// dodatkowo ograniczana w locie przez wifi_mgr_get_trail_len() (NVS/panel
-// WWW, max 120). MAX_TRACK_HISTORY_PTS to pojemnosc bufora historii per
-// samolot w track_db (PSRAM), MAX_TRACK_POINTS to bufor renderowania linii
-// sladu per slot UI - musza byc >= najwiekszej dopuszczalnej wartosci trail_len.
+// Upper bound on flight trail length - the actually displayed point count is
+// further capped at runtime by wifi_mgr_get_trail_len() (NVS/web panel, max
+// 120). MAX_TRACK_HISTORY_PTS is the per-aircraft history buffer capacity in
+// track_db (PSRAM), MAX_TRACK_POINTS is the per-UI-slot trail line render
+// buffer - both must be >= the largest allowed trail_len value.
 #define MAX_TRACK_POINTS         120
 #define MAX_TRACK_HISTORY_PTS    120
 #define MAX_HUD_SEGS             32
@@ -45,9 +45,9 @@ typedef enum {
 } AircraftType;
 
 typedef enum {
-    AIR_FILTER_ALL = 0,    // Wszystkie statki
-    AIR_FILTER_CIVIL = 1,  // Tylko cywilne / pasazerskie (is_military == false)
-    AIR_FILTER_MIL = 2     // Tylko wojskowe (is_military == true)
+    AIR_FILTER_ALL = 0,    // All aircraft
+    AIR_FILTER_CIVIL = 1,  // Civil / airliner only (is_military == false)
+    AIR_FILTER_MIL = 2     // Military only (is_military == true)
 } air_filter_mode_t;
 
 typedef struct {
@@ -85,7 +85,7 @@ typedef struct {
     bool on_ground;
 } AircraftData;
 
-// Baza lotnisk (global_airports) przeniesiona do main/airports.h / airports.c.
+// Airport database (global_airports) moved to main/airports.h / airports.c.
 
 static const float range_steps[] = {250.0f, 200.0f, 150.0f, 100.0f, 50.0f, 30.0f, 20.0f, 10.0f};
 #define NUM_RANGE_STEPS (sizeof(range_steps) / sizeof(range_steps[0]))

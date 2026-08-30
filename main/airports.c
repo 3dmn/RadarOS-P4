@@ -1,10 +1,10 @@
 #include "airports.h"
 
-// Globalna baza lotnisk (ICAO, nazwa, typ, lat, lon) - trzymana w .rodata/flash.
-// Filtrowanie do zasiegu radaru i wybranych typow (APT_TYPE_*) odbywa sie
-// w radar_ui.c (bounding-box + dystans + maska typow z panelu WWW).
+// Global airport database (ICAO, name, type, lat, lon) - kept in .rodata/flash.
+// Filtering by radar range and selected types (APT_TYPE_*) happens in
+// radar_ui.c (bounding-box + distance + type mask from the web panel).
 const airport_t global_airports[] = {
-    // --- Polska: komunikacyjne ---
+    // --- Poland: commercial ---
     {"EPWA", "Warszawa",       APT_TYPE_CIVIL, 52.1657f,  20.9671f},
     {"EPMO", "Modlin",         APT_TYPE_CIVIL, 52.4511f,  20.6518f},
     {"EPKK", "Krakow",         APT_TYPE_CIVIL, 50.0777f,  19.7848f},
@@ -21,7 +21,7 @@ const airport_t global_airports[] = {
     {"EPSY", "Szymany",        APT_TYPE_CIVIL, 53.4819f,  20.9422f},
     {"EPRA", "Radom",          APT_TYPE_CIVIL, 51.3888f,  21.2130f},
 
-    // --- Polska: wojskowe ---
+    // --- Poland: military ---
     {"EPMB", "Malbork",        APT_TYPE_MIL,   54.0300f,  19.1367f},
     {"EPDE", "Deblin",         APT_TYPE_MIL,   51.5533f,  21.8964f},
     {"EPMI", "Minsk Maz.",     APT_TYPE_MIL,   52.1922f,  21.6725f},
@@ -29,14 +29,14 @@ const airport_t global_airports[] = {
     {"EPWO", "Powidz",         APT_TYPE_MIL,   52.3789f,  17.8536f},
     {"EPSN", "Swidwin",        APT_TYPE_MIL,   53.7900f,  15.8258f},
 
-    // --- Polska: aerokluby / GA ---
+    // --- Poland: aeroclubs / GA ---
     {"EPKM", "Muchowiec",      APT_TYPE_GA,    50.2394f,  19.0000f},
     {"EPWT", "Babice",         APT_TYPE_GA,    52.2444f,  20.9078f},
     {"EPTO", "Torun",          APT_TYPE_GA,    53.0294f,  18.5436f},
     {"EPOD", "Olsztyn",        APT_TYPE_GA,    53.7744f,  20.4194f},
     {"EPPL", "Plock",          APT_TYPE_GA,    52.5628f,  19.7211f},
 
-    // --- Europa: glowne porty i wezly przesiadkowe ---
+    // --- Europe: major airports and transit hubs ---
     {"EGLL", "London Heathrow", APT_TYPE_CIVIL, 51.4700f,  -0.4543f},
     {"EGKK", "London Gatwick",  APT_TYPE_CIVIL, 51.1481f,  -0.1903f},
     {"EGCC", "Manchester",      APT_TYPE_CIVIL, 53.3537f,  -2.2750f},
@@ -128,7 +128,7 @@ const airport_t global_airports[] = {
     {"EGGD", "Bristol",         APT_TYPE_CIVIL, 51.3827f,  -2.7191f},
     {"EGBB", "Birmingham",      APT_TYPE_CIVIL, 52.4539f,  -1.7480f},
 
-    // --- Bliski Wschod ---
+    // --- Middle East ---
     {"OMDB", "Dubai",           APT_TYPE_CIVIL, 25.2532f,  55.3657f},
     {"OMDW", "Dubai World",     APT_TYPE_CIVIL, 24.8964f,  55.1719f},
     {"OMAA", "Abu Dhabi",       APT_TYPE_CIVIL, 24.4330f,  54.6511f},
@@ -142,7 +142,7 @@ const airport_t global_airports[] = {
     {"LLBG", "Tel Aviv",        APT_TYPE_CIVIL, 32.0114f,  34.8867f},
     {"OIIE", "Tehran",          APT_TYPE_CIVIL, 35.4161f,  51.1522f},
 
-    // --- Afryka ---
+    // --- Africa ---
     {"FAOR", "Johannesburg",    APT_TYPE_CIVIL, 26.1392f,  28.2460f},
     {"FACT", "Cape Town",       APT_TYPE_CIVIL, 33.9648f,  18.6017f},
     {"FADN", "Durban",          APT_TYPE_CIVIL, 29.6144f,  31.1197f},
@@ -155,7 +155,7 @@ const airport_t global_airports[] = {
     {"HKJK", "Nairobi",         APT_TYPE_CIVIL, 1.3192f,   36.9278f},
     {"DAAG", "Algiers",         APT_TYPE_CIVIL, 36.6910f,   3.2154f},
 
-    // --- Azja ---
+    // --- Asia ---
     {"VHHH", "Hong Kong",       APT_TYPE_CIVIL, 22.3080f, 113.9185f},
     {"RJTT", "Tokyo Haneda",    APT_TYPE_CIVIL, 35.5494f, 139.7798f},
     {"RJAA", "Tokyo Narita",    APT_TYPE_CIVIL, 35.7647f, 140.3864f},
@@ -191,7 +191,7 @@ const airport_t global_airports[] = {
     {"ULLI", "St Petersburg",   APT_TYPE_CIVIL, 59.8003f,  30.2625f},
     {"VTSP", "Phuket",          APT_TYPE_CIVIL, 8.1132f,   98.3169f},
 
-    // --- Ameryka Polnocna ---
+    // --- North America ---
     {"KJFK", "New York JFK",    APT_TYPE_CIVIL, 40.6413f, -73.7781f},
     {"KLGA", "New York LGA",    APT_TYPE_CIVIL, 40.7769f, -73.8740f},
     {"KEWR", "Newark",          APT_TYPE_CIVIL, 40.6895f, -74.1745f},
@@ -222,7 +222,7 @@ const airport_t global_airports[] = {
     {"TJSJ", "San Juan",        APT_TYPE_CIVIL, 18.4394f, -66.0018f},
     {"PHNL", "Honolulu",        APT_TYPE_CIVIL, 21.3245f, -157.9251f},
 
-    // --- Ameryka Poludniowa ---
+    // --- South America ---
     {"SBGR", "Sao Paulo GRU",   APT_TYPE_CIVIL, -23.4356f, -46.4731f},
     {"SBSP", "Sao Paulo CGH",   APT_TYPE_CIVIL, -23.6261f, -46.6553f},
     {"SBGL", "Rio Galeao",      APT_TYPE_CIVIL, -22.8100f, -43.2506f},
@@ -237,7 +237,7 @@ const airport_t global_airports[] = {
     {"MROC", "San Jose CR",     APT_TYPE_CIVIL,   9.9939f, -84.2088f},
     {"MPTO", "Panama City",     APT_TYPE_CIVIL,   9.0714f, -79.3835f},
 
-    // --- Australia i Oceania ---
+    // --- Australia and Oceania ---
     {"YSSY", "Sydney",          APT_TYPE_CIVIL, -33.9399f, 151.1753f},
     {"YMML", "Melbourne",       APT_TYPE_CIVIL, -37.6690f, 144.8410f},
     {"YBBN", "Brisbane",        APT_TYPE_CIVIL, -27.3842f, 153.1175f},
@@ -247,7 +247,7 @@ const airport_t global_airports[] = {
     {"NZWN", "Wellington",      APT_TYPE_CIVIL, -41.3272f, 174.8053f},
     {"NFFN", "Nadi Fiji",       APT_TYPE_CIVIL, -17.7554f, 177.4434f},
 
-    // --- Kluczowe bazy wojskowe NATO/US (Europa i swiat) ---
+    // --- Key NATO/US military bases (Europe and worldwide) ---
     {"ETAR", "Ramstein AB",     APT_TYPE_MIL,   49.4369f,   7.6003f},
     {"ETAD", "Spangdahlem",     APT_TYPE_MIL,   49.9727f,   6.6925f},
     {"EGUN", "Mildenhall",      APT_TYPE_MIL,   52.3617f,   0.4864f},

@@ -15,9 +15,9 @@
 #include "bsp/esp32_p4_wifi6_touch_lcd_7b.h"
 #include "lvgl.h"
 
-// stbi_load_from_memory() jest juz zaimplementowane (STB_IMAGE_IMPLEMENTATION)
-// w photo_service.c, ktore linkuje STBI_MALLOC do PSRAM - tutaj tylko
-// deklaracje, bez ponownej implementacji.
+// stbi_load_from_memory() is already implemented (STB_IMAGE_IMPLEMENTATION)
+// in photo_service.c, which links STBI_MALLOC to PSRAM - only declarations
+// here, no re-implementation.
 #include "stb_image.h"
 
 #include "aircraft_types.h"
@@ -55,8 +55,8 @@ static void latlon_to_tilef(double lat, double lon, int zoom, double *xtile, dou
     *ytile = (1.0 - log(tan(lat_rad) + 1.0 / cos(lat_rad)) / M_PI) / 2.0 * n;
 }
 
-// Dobiera zoom tak, by rozdzielczosc kafelkow (m/px) w przyblizeniu
-// odpowiadala skali radaru: range_km na RADAR_MAX_RADIUS pikseli.
+// Picks a zoom level so the tile resolution (m/px) approximately matches
+// the radar scale: range_km over RADAR_MAX_RADIUS pixels.
 static int compute_zoom_for_range(float range_km, float lat) {
     double lat_rad = (double)lat * M_PI / 180.0;
     double meters_per_px_target = ((double)range_km * 1000.0) / (double)RADAR_MAX_RADIUS;
@@ -96,16 +96,16 @@ static bool http_get_tile(const char *url, uint8_t *buf, int buf_size, int *out_
         ok = (*out_status == 200 && total > 0);
         esp_http_client_close(client);
     } else {
-        ESP_LOGW(TAG, "HTTP open blad: %s (%s)", esp_err_to_name(err), url);
+        ESP_LOGW(TAG, "HTTP open failed: %s (%s)", esp_err_to_name(err), url);
     }
     esp_http_client_cleanup(client);
     return ok;
 }
 
-// Konwertuje kafelek RGB888 do luminancji, odwraca ja (negatyw) i
-// przyciemnia do jednolitego, neutralnego odcienia szarosci/grafitu (bez
-// przebarwien - r=g=b), po czym wpisuje wynik (konwertujac do RGB565) w
-// bufor canvas mapy (MAP_SIZE x MAP_SIZE) 1:1, z przycinaniem do granic.
+// Converts an RGB888 tile to luminance, inverts it (negative) and darkens
+// it to a uniform, neutral shade of gray/graphite (no tint - r=g=b), then
+// writes the result (converted to RGB565) into the map canvas buffer
+// (MAP_SIZE x MAP_SIZE) 1:1, clipped to its bounds.
 static void darken_and_blit_tile(const uint8_t *rgb, int tile_w, int tile_h, int dst_x0, int dst_y0) {
     uint16_t *dst = (uint16_t *)s_canvas_buf;
     for (int y = 0; y < tile_h; y++) {
@@ -144,7 +144,7 @@ static void process_reload(float lat, float lon, float range_km) {
 
     uint8_t *png_buf = heap_caps_malloc(MAP_TILE_PNG_BUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!png_buf) {
-        ESP_LOGE(TAG, "Nie udalo sie zaalokowac bufora PNG kafelka w PSRAM!");
+        ESP_LOGE(TAG, "Failed to allocate tile PNG buffer in PSRAM!");
         return;
     }
 
@@ -159,7 +159,7 @@ static void process_reload(float lat, float lon, float range_km) {
 
             int len = 0, status = 0;
             if (!http_get_tile(url, png_buf, MAP_TILE_PNG_BUF_SIZE, &len, &status)) {
-                ESP_LOGW(TAG, "Pobranie kafelka nieudane: %s (status %d)", url, status);
+                ESP_LOGW(TAG, "Tile fetch failed: %s (status %d)", url, status);
                 continue;
             }
 
@@ -167,7 +167,7 @@ static void process_reload(float lat, float lon, float range_km) {
             unsigned char *rgb = stbi_load_from_memory(png_buf, len, &w, &h, &ch, 3);
             if (!rgb || w <= 0 || h <= 0) {
                 if (rgb) stbi_image_free(rgb);
-                ESP_LOGW(TAG, "Dekodowanie PNG nieudane dla kafelka %d/%d/%d", zoom, tx, ty);
+                ESP_LOGW(TAG, "PNG decode failed for tile %d/%d/%d", zoom, tx, ty);
                 continue;
             }
 
@@ -204,14 +204,14 @@ bool map_tile_service_init(void) {
 
     s_canvas_buf = heap_caps_malloc((size_t)MAP_SIZE * MAP_SIZE * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_canvas_buf) {
-        ESP_LOGE(TAG, "Nie udalo sie zaalokowac bufora canvas mapy w PSRAM!");
+        ESP_LOGE(TAG, "Failed to allocate map canvas buffer in PSRAM!");
         return false;
     }
     memset(s_canvas_buf, 0, (size_t)MAP_SIZE * MAP_SIZE * 2);
 
     s_req_queue = xQueueCreate(1, sizeof(map_reload_req_t));
     if (!s_req_queue) {
-        ESP_LOGE(TAG, "Nie udalo sie utworzyc kolejki map_tile_service!");
+        ESP_LOGE(TAG, "Failed to create map_tile_service queue!");
         return false;
     }
 

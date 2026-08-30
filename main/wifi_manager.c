@@ -56,8 +56,8 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT      BIT0
 
 static httpd_handle_t g_web_server = NULL;
-// Sledzi, czy esp_netif_create_default_wifi_sta() zostalo juz wywolane -
-// wywolanie go dwukrotnie jest niebezpieczne (kolizja klucza netif).
+// Tracks whether esp_netif_create_default_wifi_sta() has already been
+// called - calling it twice is unsafe (netif key collision).
 static bool s_sta_netif_created = false;
 
 float g_radar_lat = RADAR_LAT_DEFAULT;
@@ -91,7 +91,7 @@ static uint16_t clamp_max_aircraft(uint16_t v) {
 static void load_settings_from_nvs(void) {
     nvs_handle_t my_handle;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &my_handle) != ESP_OK) {
-        ESP_LOGI(TAG, "Brak zapisanej konfiguracji, uzywam wartosci domyslnych.");
+        ESP_LOGI(TAG, "No saved configuration, using default values.");
         return;
     }
 
@@ -157,7 +157,7 @@ static void load_settings_from_nvs(void) {
     g_max_aircraft = clamp_max_aircraft(g_max_aircraft);
 
     nvs_close(my_handle);
-    ESP_LOGI(TAG, "Wczytano z NVS: SSID='%s' stacja='%s' (%.6f, %.6f)",
+    ESP_LOGI(TAG, "Loaded from NVS: SSID='%s' station='%s' (%.6f, %.6f)",
              g_wifi_ssid, g_station_name, g_radar_lat, g_radar_lon);
 }
 
@@ -243,8 +243,8 @@ void wifi_mgr_set_max_aircraft(uint16_t max_val) {
     g_max_aircraft = clamp_max_aircraft(max_val);
 }
 
-// ================= PANEL WWW =================
-// arg: opoznienie w ms (przekazane jako wartosc wskaznika, nie adres).
+// ================= WEB PANEL =================
+// arg: delay in ms (passed as a pointer value, not an address).
 static void restart_task(void *arg) {
     uint32_t delay_ms = (uint32_t)(uintptr_t)arg;
     vTaskDelay(pdMS_TO_TICKS(delay_ms));
@@ -268,13 +268,13 @@ static void url_decode(char *s) {
     *o = '\0';
 }
 
-// ================= BUDOWA STRONY WWW =================
-// Cala strona budowana jest do jednego bufora (malloc, zwalniany na koncu
-// handlera) przez sekwencje hb_append() zamiast dziesiatek osobnych
-// static const fragmentow + snprintf-buforow na stosie jak poprzednio -
-// znacznie mniej podatne na bledy przy dalszej rozbudowie i nizsze zuzycie
-// stosu tasku httpd (jeden bufor zamiast ~10 osobnych, licza sie razem
-// kilka KB na kazde wywolanie handlera).
+// ================= WEB PAGE BUILDING =================
+// The whole page is built into a single buffer (malloc, freed at the end of
+// the handler) through a sequence of hb_append() calls instead of the dozens
+// of separate static const fragments + stack snprintf buffers used
+// previously - far less error-prone as the page grows further, and lower
+// httpd task stack usage (one buffer instead of ~10 separate ones, together
+// several KB per handler call).
 typedef struct {
     char *buf;
     size_t cap;
@@ -301,8 +301,8 @@ static void hb_append(html_builder_t *hb, const char *fmt, ...) {
 
 #define HTML_PAGE_BUF_SIZE (64 * 1024)
 
-// Aktualny status polaczenia (STA polaczone / AP-setup) i adres IP interfejsu,
-// ktory faktycznie serwuje panel WWW - do zakladki "Wi-Fi & Network".
+// Current connection status (STA connected / AP-setup) and IP address of the
+// interface actually serving the web panel - for the "Wi-Fi & Network" tab.
 static void get_wifi_status_info(bool *out_sta_connected, char *ip_buf, size_t ip_len) {
     bool sta_connected = (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) != 0;
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey(sta_connected ? "WIFI_STA_DEF" : "WIFI_AP_DEF");
@@ -314,18 +314,19 @@ static void get_wifi_status_info(bool *out_sta_connected, char *ip_buf, size_t i
     *out_sta_connected = sta_connected;
 }
 
-// Usuwa wiodace 'v'/'V' z ciagu (np. git describe czasem juz zwraca "v..."),
-// zeby doklejenie wlasnego prefiksu "v" w FW_VERSION/commit nie dawalo "vv".
+// Strips a leading 'v'/'V' from a string (e.g. git describe sometimes
+// already returns "v..."), so appending our own "v" prefix in
+// FW_VERSION/commit doesn't produce "vv".
 static const char *strip_v_prefix(const char *s) {
     if (s && (s[0] == 'v' || s[0] == 'V') && s[1] != '\0') return s + 1;
     return s ? s : "";
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req) {
-    // Bufor strony budowany jest w PSRAM (nie na stosie taska httpd ani na
-    // ciasnej wewnetrznej stercie) - przy 64 KB zwykly malloc() tez trafilby
-    // w SPIRAM (CONFIG_SPIRAM_USE_MALLOC), ale heap_caps_malloc wymusza to
-    // jawnie niezaleznie od progu auto-routingu alokatora.
+    // The page buffer is built in PSRAM (not on the httpd task stack or the
+    // tight internal heap) - at 64 KB a plain malloc() would also land in
+    // SPIRAM (CONFIG_SPIRAM_USE_MALLOC), but heap_caps_malloc forces this
+    // explicitly regardless of the allocator's auto-routing threshold.
     char *page = heap_caps_malloc(HTML_PAGE_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!page) {
         page = malloc(HTML_PAGE_BUF_SIZE);
@@ -342,18 +343,20 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     char ip_str[16] = "0.0.0.0";
     get_wifi_status_info(&sta_connected, ip_str, sizeof(ip_str));
     const esp_app_desc_t *app_desc = esp_app_get_description();
-    // Pelny string wersji ("RadarOS P4 v1.1.0 . commit 948d2d3 (IDF v5.3.5)")
-    // do zakladki System oraz krotszy do stalej stopki - commit hash pochodzi
-    // z esp_app_desc_t.version (auto. git describe z build systemu ESP-IDF),
-    // strip_v_prefix zapobiega podwojnemu "vv" gdyby ten string mial juz "v".
+    // Full version string ("RadarOS P4 v1.1.0 . commit 948d2d3 (IDF v5.3.5)")
+    // for the System tab, and a shorter one for the fixed footer - the
+    // commit hash comes from esp_app_desc_t.version (auto git describe from
+    // the ESP-IDF build system), strip_v_prefix prevents a double "vv" if
+    // that string already had a "v".
     char fw_full[112];
     snprintf(fw_full, sizeof(fw_full), "%s %s \xC2\xB7 commit %s (IDF %s)",
              FW_NAME, FW_VERSION, strip_v_prefix(app_desc->version), app_desc->idf_ver);
     char fw_footer[80];
     snprintf(fw_footer, sizeof(fw_footer), "%s %s (IDF %s)", FW_NAME, FW_VERSION, app_desc->idf_ver);
-    // Urzadzenie bez polaczenia STA serwuje panel z SoftAP (tryb konfiguracji)
-    // - w tym stanie uzytkownik prawie zawsze przyszedl tu ustawic Wi-Fi,
-    // wiec domyslnie aktywna zakladka to "Wi-Fi & Network" zamiast "Radar".
+    // A device without an STA connection serves the panel from its SoftAP
+    // (setup mode) - in that state the user almost always came here to set
+    // up Wi-Fi, so the default active tab is "Wi-Fi & Network" instead of
+    // "Radar".
     bool ap_mode = !sta_connected;
 
     hb_append(&hb,
@@ -425,8 +428,8 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "<form id='cfgForm' onsubmit='return saveConfig(event)'>",
         T(STR_WEB_PAGE_TITLE), T(STR_WEB_PAGE_TITLE));
 
-    // Pasek zakladek (top tabs) - przelaczanie widokow czystym
-    // JS (element.style.display), patrz showTab() w <script> ponizej.
+    // Tab bar (top tabs) - view switching via plain JS
+    // (element.style.display), see showTab() in <script> below.
     hb_append(&hb,
         "<div class='tabbar'>"
         "<button type='button' class='tabbtn%s' data-tab='display' onclick=\"showTab('display')\">\xF0\x9F\x93\x9F %s</button>"
@@ -437,7 +440,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         ap_mode ? "" : " active", T(STR_WEB_TAB_DISPLAY), T(STR_WEB_TAB_LOCATION),
         ap_mode ? " active" : "", T(STR_WEB_TAB_WIFI), T(STR_WEB_TAB_SYSTEM));
 
-    // ZAKLADKA: Radar & Display (domyslna w trybie STA)
+    // TAB: Radar & Display (default in STA mode)
     hb_append(&hb, "<div class='card tabpanel' id='tab-display' style='display:%s'><h2>\xF0\x9F\x8E\x9B\xEF\xB8\x8F %s</h2>",
               ap_mode ? "none" : "block", T(STR_WEB_CARD_DISPLAY));
     hb_append(&hb,
@@ -541,7 +544,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 
     hb_append(&hb, "</div>"); // #tab-display
 
-    // ZAKLADKA: Location
+    // TAB: Location
     hb_append(&hb, "<div class='card tabpanel' id='tab-location' style='display:none'><h2>\xF0\x9F\x93\x8D %s</h2>", T(STR_WEB_CARD_LOCATION));
     hb_append(&hb,
         "<div class='grid2'>"
@@ -554,7 +557,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         T(STR_WEB_SELECT_ON_MAP));
     hb_append(&hb, "</div>"); // #tab-location
 
-    // ZAKLADKA: Wi-Fi & Network (domyslna w trybie AP/setup)
+    // TAB: Wi-Fi & Network (default in AP/setup mode)
     hb_append(&hb, "<div class='card tabpanel' id='tab-wifi' style='display:%s'><h2>\xF0\x9F\x93\xB6 %s</h2>",
               ap_mode ? "block" : "none", T(STR_WEB_WIFI_SECTION));
     hb_append(&hb,
@@ -574,7 +577,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         T(STR_WEB_IP_ADDRESS), ip_str);
     hb_append(&hb, "</div>"); // #tab-wifi
 
-    // ZAKLADKA: System
+    // TAB: System
     hb_append(&hb, "<div class='card tabpanel' id='tab-system' style='display:none'><h2>\xE2\x9A\x99\xEF\xB8\x8F %s</h2>", T(STR_WEB_TAB_SYSTEM));
     hb_append(&hb,
         "<label>%s</label>"
@@ -589,9 +592,9 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "<div class='statrow'><span>%s</span><span>%s</span></div>",
         T(STR_WEB_FIRMWARE_INFO), fw_full);
 
-    // Kopia zapasowa / przywracanie konfiguracji - eksport nie zawiera hasla
-    // Wi-Fi (bezpieczenstwo), import dziala poza formularzem (fetch JSON
-    // bezposrednio do /import_config), wiec nie rusza pol formularza.
+    // Configuration backup/restore - the export does not include the Wi-Fi
+    // password (security), import works outside the form (fetches JSON
+    // directly to /import_config), so it never touches the form fields.
     hb_append(&hb,
         "<div style='margin-top:18px;border-top:1px solid #30363d;padding-top:14px;'>"
         "<label style='color:#00ff88;font-weight:bold;'>\xF0\x9F\x93\xA6 %s</label>"
@@ -605,8 +608,8 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "</div>",
         T(STR_WEB_BACKUP_SECTION), T(STR_WEB_EXPORT_BTN), T(STR_WEB_IMPORT_BTN), T(STR_WEB_IMPORT_LABEL));
 
-    // Aktualizacja firmware przez przegladarke (surowe bajty .bin w ciele
-    // POST /update, postep liczony z xhr.upload.onprogress w JS).
+    // Browser-based firmware update (raw .bin bytes in the POST /update
+    // body, progress computed from xhr.upload.onprogress in JS).
     hb_append(&hb,
         "<div style='margin-top:18px;border-top:1px solid #30363d;padding-top:14px;'>"
         "<label style='color:#00ff88;font-weight:bold;'>\xE2\x9A\xA1 %s</label>"
@@ -622,8 +625,8 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 
     hb_append(&hb, "</div>"); // #tab-system
 
-    // Stala stopka wersji - poza tabpanelami (widoczna na kazdej zakladce),
-    // tuz nad przyciskiem zapisu.
+    // Fixed version footer - outside the tab panels (visible on every tab),
+    // right above the save button.
     hb_append(&hb,
         "<div class='fw-footer'><span class='fw-label'>%s</span> <span class='fw-val'>%s</span></div>",
         T(STR_WEB_FW_FOOTER_LABEL), fw_footer);
@@ -768,7 +771,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         T(STR_WEB_OTA_UPLOADING), T(STR_WEB_OTA_OK), T(STR_WEB_OTA_ERROR), T(STR_WEB_OTA_SELECT_FILE));
 
     if (hb.pos >= hb.cap - 1) {
-        ESP_LOGE(TAG, "Strona WWW przekroczyla bufor %d B - odpowiedz ucieta!", HTML_PAGE_BUF_SIZE);
+        ESP_LOGE(TAG, "Web page exceeded buffer (%d B) - response truncated!", HTML_PAGE_BUF_SIZE);
     }
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -852,8 +855,8 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         g_apts_mode = (atoi(param) == 1) ? 1 : 0;
     }
     {
-        // Checkboxy nieodznaczone nie sa wysylane w formularzu - brak klucza
-        // oznacza wylaczony typ, wiec maska jest budowana od zera.
+        // Unchecked checkboxes are not sent in the form - a missing key
+        // means the type is disabled, so the mask is built from zero.
         uint8_t mask = 0;
         if (httpd_query_key_value(buf, "apt_civil", param, sizeof(param)) == ESP_OK) mask |= APT_TYPE_CIVIL;
         if (httpd_query_key_value(buf, "apt_mil", param, sizeof(param)) == ESP_OK) mask |= APT_TYPE_MIL;
@@ -890,7 +893,7 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     free(buf);
 
     save_settings_to_nvs();
-    ESP_LOGI(TAG, "Zapisano konfiguracje z panelu WWW: SSID='%s' stacja='%s' (%.6f, %.6f)",
+    ESP_LOGI(TAG, "Saved configuration from web panel: SSID='%s' station='%s' (%.6f, %.6f)",
              g_wifi_ssid, g_station_name, g_radar_lat, g_radar_lon);
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -900,9 +903,10 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// Eksport biezacej konfiguracji jako plik JSON do pobrania z przegladarki.
-// Haslo Wi-Fi celowo pominiete (bezpieczenstwo) - eksport sluzy do kopii
-// ustawien radaru, nie do przenoszenia poswiadczen sieciowych.
+// Exports the current configuration as a JSON file for the browser to
+// download. The Wi-Fi password is deliberately omitted (security) - the
+// export is meant for backing up radar settings, not for carrying network
+// credentials.
 static esp_err_t export_config_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "station_name", g_station_name);
@@ -937,9 +941,9 @@ static esp_err_t export_config_get_handler(httpd_req_t *req) {
 
 #define IMPORT_BODY_MAX_LEN 2048
 
-// Import konfiguracji z pliku JSON (patrz export_config_get_handler dla
-// schematu pol) - kazde pole jest opcjonalne i walidowane tak samo jak w
-// save_post_handler, nieznane/brakujace klucze sa po prostu pomijane.
+// Imports the configuration from a JSON file (see export_config_get_handler
+// for the field schema) - every field is optional and validated the same
+// way as in save_post_handler; unknown/missing keys are simply skipped.
 static esp_err_t import_config_post_handler(httpd_req_t *req) {
     int total_len = req->content_len;
     if (total_len <= 0 || total_len > IMPORT_BODY_MAX_LEN) {
@@ -1033,7 +1037,7 @@ static esp_err_t import_config_post_handler(httpd_req_t *req) {
     cJSON_Delete(root);
 
     save_settings_to_nvs();
-    ESP_LOGI(TAG, "Zaimportowano konfiguracje z pliku JSON, restart urzadzenia...");
+    ESP_LOGI(TAG, "Imported configuration from JSON file, restarting device...");
 
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
@@ -1044,10 +1048,10 @@ static esp_err_t import_config_post_handler(httpd_req_t *req) {
 
 #define OTA_RECV_CHUNK_SIZE 4096
 
-// Aktualizacja firmware przez przegladarke: cialo POST /update to surowe
-// bajty pliku .bin (bez multipart), strumieniowane wprost do partycji OTA.
-// Po powodzeniu restart nastepuje z ~2s opoznieniem (patrz restart_task),
-// zeby przegladarka zdazyla wyswietlic komunikat/pasek postepu na 100%.
+// Browser-based firmware update: the POST /update body is the raw .bin file
+// bytes (no multipart), streamed straight into the OTA partition. On
+// success the restart happens after a ~2s delay (see restart_task), so the
+// browser has time to show the message/progress bar at 100%.
 static esp_err_t update_post_handler(httpd_req_t *req) {
     int total_len = req->content_len;
     if (total_len <= 0) {
@@ -1057,7 +1061,7 @@ static esp_err_t update_post_handler(httpd_req_t *req) {
 
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (!update_partition) {
-        ESP_LOGE(TAG, "OTA: brak wolnej partycji aktualizacji");
+        ESP_LOGE(TAG, "OTA: no free update partition");
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
@@ -1065,7 +1069,7 @@ static esp_err_t update_post_handler(httpd_req_t *req) {
     esp_ota_handle_t ota_handle;
     esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA: esp_ota_begin nieudane: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OTA: esp_ota_begin failed: %s", esp_err_to_name(err));
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
@@ -1096,26 +1100,26 @@ static esp_err_t update_post_handler(httpd_req_t *req) {
 
     if (ota_failed) {
         esp_ota_abort(ota_handle);
-        ESP_LOGE(TAG, "OTA: blad odbioru/zapisu firmware");
+        ESP_LOGE(TAG, "OTA: firmware receive/write failed");
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
 
     err = esp_ota_end(ota_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA: esp_ota_end nieudane (uszkodzony obraz?): %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OTA: esp_ota_end failed (corrupt image?): %s", esp_err_to_name(err));
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
 
     err = esp_ota_set_boot_partition(update_partition);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA: esp_ota_set_boot_partition nieudane: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "OTA: esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "OTA: firmware zapisany pomyslnie (%d B), restart za 2s...", total_len);
+    ESP_LOGI(TAG, "OTA: firmware written successfully (%d B), restarting in 2s...", total_len);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
 
@@ -1123,8 +1127,8 @@ static esp_err_t update_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// Wpisuje SSID do bufora JSON, eskejpujac '"' i '\\' oraz pomijajac znaki
-// kontrolne (SSID moze teoretycznie zawierac dowolne bajty).
+// Writes the SSID into a JSON buffer, escaping '"' and '\\' and skipping
+// control characters (an SSID can theoretically contain arbitrary bytes).
 static void json_escape_ssid(const char *ssid, char *out, size_t out_size) {
     size_t o = 0;
     for (size_t i = 0; ssid[i] != '\0' && o < out_size - 1; i++) {
@@ -1144,10 +1148,10 @@ static void json_escape_ssid(const char *ssid, char *out, size_t out_size) {
 
 #define SCAN_MAX_APS 20
 
-// Skanuje dostepne sieci Wi-Fi i zwraca tablice JSON z nazwami SSID.
-// Jesli urzadzenie jest w trybie czystego SoftAP (pierwsza konfiguracja bez
-// zapisanej sieci), na czas skanowania przelacza sie na APSTA - sam SoftAP
-// (i polaczeni klienci obslugujacy ten panel) pozostaje aktywny.
+// Scans available Wi-Fi networks and returns a JSON array of SSID names. If
+// the device is in pure SoftAP mode (first-time setup with no saved
+// network), it switches to APSTA for the duration of the scan - the SoftAP
+// itself (and clients connected to this panel) stays active.
 static esp_err_t scan_get_handler(httpd_req_t *req) {
     wifi_mode_t mode = WIFI_MODE_NULL;
     esp_wifi_get_mode(&mode);
@@ -1175,7 +1179,7 @@ static esp_err_t scan_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
 
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Skanowanie Wi-Fi nieudane: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Wi-Fi scan failed: %s", esp_err_to_name(err));
         httpd_resp_sendstr(req, "[]");
     } else {
         uint16_t ap_count = 0;
@@ -1189,7 +1193,7 @@ static esp_err_t scan_get_handler(httpd_req_t *req) {
             ap_count = 0;
         }
 
-        ESP_LOGI(TAG, "Skanowanie zakonczone: znaleziono %d sieci Wi-Fi", ap_count);
+        ESP_LOGI(TAG, "Scan complete: found %d Wi-Fi networks", ap_count);
 
         size_t json_size = (size_t)ap_count * 56 + 8;
         char *json = malloc(json_size);
@@ -1262,30 +1266,30 @@ static void start_web_server(void) {
         httpd_register_uri_handler(g_web_server, &export_uri);
         httpd_register_uri_handler(g_web_server, &import_uri);
         httpd_register_uri_handler(g_web_server, &update_uri);
-        ESP_LOGI(TAG, "Panel WWW konfiguracji radaru uruchomiony na porcie 80!");
+        ESP_LOGI(TAG, "Radar configuration web panel started on port 80!");
     }
 }
 
-// ================= OBSLUGA ZDARZEN WI-FI =================
+// ================= WI-FI EVENT HANDLING =================
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGI(TAG, "Wi-Fi rozlaczone, ponawianie polaczenia...");
+        ESP_LOGI(TAG, "Wi-Fi disconnected, retrying connection...");
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "Polaczono z Wi-Fi. Uzyskano adres IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "Connected to Wi-Fi. Obtained IP address: " IPSTR, IP2STR(&event->ip_info.ip));
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         start_web_server();
     }
 }
 
-// Probuje polaczyc sie w trybie STA z zapisana siecia. Zwraca true w razie sukcesu.
+// Attempts to connect in STA mode to the saved network. Returns true on success.
 static bool wifi_try_connect_sta(void) {
     if (strlen(g_wifi_ssid) == 0) {
-        ESP_LOGW(TAG, "Brak skonfigurowanego SSID.");
+        ESP_LOGW(TAG, "No SSID configured.");
         return false;
     }
 
@@ -1305,14 +1309,14 @@ static bool wifi_try_connect_sta(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "Laczenie z siecia '%s' (timeout %d s)...", g_wifi_ssid, WIFI_CONNECT_TIMEOUT_MS / 1000);
+    ESP_LOGI(TAG, "Connecting to network '%s' (timeout %d s)...", g_wifi_ssid, WIFI_CONNECT_TIMEOUT_MS / 1000);
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE,
                                             pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
     if (bits & WIFI_CONNECTED_BIT) {
         return true;
     }
 
-    ESP_LOGW(TAG, "Nie udalo sie polaczyc z '%s' - przechodze w tryb SoftAP.", g_wifi_ssid);
+    ESP_LOGW(TAG, "Failed to connect to '%s' - switching to SoftAP mode.", g_wifi_ssid);
     esp_wifi_stop();
     esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id);
     esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip);
@@ -1337,28 +1341,28 @@ static void start_ap_mode(void) {
 
     err = esp_wifi_set_mode(WIFI_MODE_AP);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_set_mode(AP) nieudane: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_wifi_set_mode(AP) failed: %s", esp_err_to_name(err));
         ok = false;
     }
 
     err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_set_config(AP) nieudane: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_wifi_set_config(AP) failed: %s", esp_err_to_name(err));
         ok = false;
     }
 
     err = esp_wifi_start();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_wifi_start() (SoftAP) nieudane: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_wifi_start() (SoftAP) failed: %s", esp_err_to_name(err));
         ok = false;
     }
 
     if (!ok) {
-        ESP_LOGE(TAG, "Nie udalo sie uruchomic SoftAP '%s' - panel WWW bedzie niedostepny.", AP_SSID);
+        ESP_LOGE(TAG, "Failed to start SoftAP '%s' - the web panel will be unavailable.", AP_SSID);
         return;
     }
 
-    ESP_LOGI(TAG, "SoftAP uruchomiony: SSID='%s' (bez hasla). Polacz sie i wejdz na http://192.168.4.1/", AP_SSID);
+    ESP_LOGI(TAG, "SoftAP started: SSID='%s' (no password). Connect and go to http://192.168.4.1/", AP_SSID);
     start_web_server();
 }
 

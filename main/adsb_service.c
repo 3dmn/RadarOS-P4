@@ -31,7 +31,7 @@ AircraftData *live_fleet = NULL;
 static AircraftData *temp_fleet = NULL;
 int total_aircraft_in_zone = 0;
 
-// Co ile cykli odpytywania (co API_FETCH_SEC sekund) logowana jest telemetria pamieci.
+// How many polling cycles (each API_FETCH_SEC seconds) between memory telemetry logs.
 #define MEM_TELEMETRY_EVERY_N_CYCLES  15
 
 uint32_t get_time_ms(void) {
@@ -134,9 +134,9 @@ static AircraftTrackHistory* record_aircraft_track(const char *hex, float lat, f
     return th;
 }
 
-// ================= PARSER JSON ADS-B =================
-// Wyszukiwanie ograniczone do [block, end) - nie wychodzi poza pojedynczy
-// obiekt JSON samolotu (np. na kolejny "{\"hex\":..." w tablicy "ac").
+// ================= ADS-B JSON PARSER =================
+// Search bounded to [block, end) - never crosses into the next aircraft
+// JSON object (e.g. the next "{\"hex\":..." entry in the "ac" array).
 static const char *bounded_strstr(const char *block, const char *end, const char *needle) {
     if (!block || !end || !needle) return NULL;
     size_t needle_len = strlen(needle);
@@ -217,10 +217,11 @@ static bool detect_military(const char *block, const char *end, const char *call
     return false;
 }
 
-// Czysci callsign z paddingu 6-bit ADS-B ('@' = kod 0x00) i innych znakow
-// niedrukowalnych, po czym obcina wiodace/koncowe spacje. Jesli po czyszczeniu
-// nic nie zostanie (samo padding/spacje/pusty string), podstawia czytelny
-// adres ICAO Hex (wielkimi literami) zamiast pustego/smieciowego identyfikatora.
+// Strips 6-bit ADS-B padding ('@' = code 0x00) and other non-printable
+// characters from the callsign, then trims leading/trailing spaces. If
+// nothing is left after cleanup (pure padding/spaces/empty string), falls
+// back to the readable ICAO hex address (uppercased) instead of an empty or
+// garbled identifier.
 static void sanitize_callsign(char *cs, size_t cs_size, const char *hex) {
     for (size_t i = 0; cs[i] != '\0'; i++) {
         unsigned char c = (unsigned char)cs[i];
@@ -289,8 +290,8 @@ static int parse_adsb_json(const char *json, AircraftData *out_planes, int max_p
 
         plane->is_military = detect_military(p, end, plane->callsign);
 
-        // dump1090-pochodne API (adsb.fi, airplanes.live) sygnalizuja samolot
-        // na ziemi wartoscia tekstowa "ground" w polu alt_baro (zamiast liczby).
+        // dump1090-derived APIs (adsb.fi, airplanes.live) flag an aircraft on
+        // the ground with the text value "ground" in alt_baro (instead of a number).
         plane->on_ground = bounded_strstr(p, end, "\"alt_baro\":\"ground\"") != NULL;
 
         json_get_float(p, end, "lat", &plane->lat);
@@ -321,25 +322,25 @@ static int parse_adsb_json(const char *json, AircraftData *out_planes, int max_p
     }
 
     if (count == max_planes && p != NULL && strstr(p, "{\"hex\":") != NULL) {
-        ESP_LOGW(TAG, "Limit max_aircraft (%d) osiagniety - nadmiarowe samoloty w odpowiedzi API zostaly odrzucone", max_planes);
+        ESP_LOGW(TAG, "Max aircraft limit (%d) reached - excess aircraft in API response discarded", max_planes);
     }
 
     return count;
 }
 
-// ================= TELEMETRIA PAMIECI =================
+// ================= MEMORY TELEMETRY =================
 static void log_memory_telemetry(void) {
-    ESP_LOGI(TAG, "Heap: wolna=%" PRIu32 "B min=%" PRIu32 "B | PSRAM wolna=%u B | stos adsb_worker: %u B wolne",
+    ESP_LOGI(TAG, "Heap: free=%" PRIu32 "B min=%" PRIu32 "B | PSRAM free=%u B | adsb_worker stack: %u B free",
              (uint32_t)esp_get_free_heap_size(),
              (uint32_t)esp_get_minimum_free_heap_size(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
              (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
 }
 
-// ================= WATEK SIECIOWY ADS-B =================
+// ================= ADS-B NETWORK TASK =================
 bool adsb_service_lock(uint32_t timeout_ms) {
     if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
-        ESP_LOGW(TAG, "Timeout (%" PRIu32 "ms) oczekiwania na g_data_mutex", timeout_ms);
+        ESP_LOGW(TAG, "Timeout (%" PRIu32 "ms) waiting for g_data_mutex", timeout_ms);
         return false;
     }
     return true;
@@ -351,11 +352,11 @@ void adsb_service_unlock(void) {
 
 static void adsb_worker_task(void *pvParameters) {
     wifi_manager_wait_connected();
-    ESP_LOGI(TAG, "Start zadan cyklicznego odpytywania ADS-B...");
+    ESP_LOGI(TAG, "Starting cyclic ADS-B polling task...");
 
     char *resp_buf = heap_caps_malloc(HTTP_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
     if (!resp_buf) {
-        ESP_LOGE(TAG, "Blad alokacji bufora ADS-B w PSRAM!");
+        ESP_LOGE(TAG, "Failed to allocate ADS-B buffer in PSRAM!");
         vTaskDelete(NULL);
         return;
     }
@@ -378,13 +379,13 @@ static void adsb_worker_task(void *pvParameters) {
         .buffer_size_tx = 1024,
         .user_agent = "ADSBRadarViewer/1.0",
     };
-    // Uchwyt klienta HTTP jest tworzony raz i reuzywany przez caly czas zycia
-    // tasku (tylko esp_http_client_set_url() miedzy cyklami) - unika to
-    // powtarzalnej alokacji/zwolnienia struktur klienta co API_FETCH_SEC sekund
-    // i ogranicza fragmentacje sterty DRAM przy dlugotrwalej pracy.
+    // The HTTP client handle is created once and reused for the task's whole
+    // lifetime (only esp_http_client_set_url() between cycles) - this avoids
+    // repeated allocation/free of client structures every API_FETCH_SEC
+    // seconds and limits DRAM heap fragmentation over long-running operation.
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
-        ESP_LOGE(TAG, "Blad inicjalizacji klienta HTTP!");
+        ESP_LOGE(TAG, "Failed to initialize HTTP client!");
         heap_caps_free(resp_buf);
         vTaskDelete(NULL);
         return;
@@ -411,7 +412,7 @@ static void adsb_worker_task(void *pvParameters) {
                 esp_http_client_close(client);
 
                 if (total_read >= HTTP_BUFFER_SIZE - 1) {
-                    ESP_LOGW(TAG, "Bufor HTTP (%d B) zapelniony - odpowiedz API mogla zostac ucieta", HTTP_BUFFER_SIZE);
+                    ESP_LOGW(TAG, "HTTP buffer (%d B) full - API response may have been truncated", HTTP_BUFFER_SIZE);
                 }
 
                 if (total_read > 200) {
@@ -428,7 +429,7 @@ static void adsb_worker_task(void *pvParameters) {
                             else live_fleet[i].active = false;
                         }
                         adsb_service_unlock();
-                        ESP_LOGI(TAG, "Pobrano %d samolotow z %s", parsed, url);
+                        ESP_LOGI(TAG, "Fetched %d aircraft from %s", parsed, url);
 
                         radar_ui_refresh();
                     }
@@ -436,12 +437,12 @@ static void adsb_worker_task(void *pvParameters) {
                     host_idx = (host_idx + 1) % 2;
                 }
             } else {
-                ESP_LOGW(TAG, "Odpowiedz HTTP %d z API ADS-B (%s)", status, url);
+                ESP_LOGW(TAG, "HTTP response %d from ADS-B API (%s)", status, url);
                 esp_http_client_close(client);
                 host_idx = (host_idx + 1) % 2;
             }
         } else {
-            ESP_LOGW(TAG, "Blad zapytania ADS-B HTTPS: %s", esp_err_to_name(err));
+            ESP_LOGW(TAG, "ADS-B HTTPS request failed: %s", esp_err_to_name(err));
             host_idx = (host_idx + 1) % 2;
         }
 
@@ -463,7 +464,7 @@ bool adsb_service_init(void) {
     temp_fleet = (AircraftData *)heap_caps_calloc(MAX_AIRCRAFT_CAPACITY, sizeof(AircraftData), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
     if (!g_data_mutex || !track_db || !live_fleet || !temp_fleet) {
-        ESP_LOGE(TAG, "Nie udalo sie zaalokowac pamieci struktur ADS-B w PSRAM!");
+        ESP_LOGE(TAG, "Failed to allocate ADS-B data structures in PSRAM!");
         return false;
     }
     return true;

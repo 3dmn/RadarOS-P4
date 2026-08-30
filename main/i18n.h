@@ -1,7 +1,7 @@
 #pragma once
 
 typedef enum {
-    LANG_EN = 0, // Domyslny
+    LANG_EN = 0, // Default
     LANG_PL = 1,
     LANG_COUNT
 } app_lang_t;
@@ -96,10 +96,10 @@ typedef enum {
     STR_COUNT
 } i18n_str_id_t;
 
-// Ustawia aktywny jezyk dla T(). Wolane po odczycie z NVS
-// (wifi_mgr_get_lang()) - bezpieczne do wywolania wielokrotnie.
+// Sets the active language for T(). Called after reading it from NVS
+// (wifi_mgr_get_lang()) - safe to call repeatedly.
 void i18n_set_lang(app_lang_t lang);
 app_lang_t i18n_get_lang(void);
 
-// Zwraca przetlumaczony tekst dla biezacego jezyka (nigdy NULL).
+// Returns the translated text for the current language (never NULL).
 const char *T(i18n_str_id_t id);
