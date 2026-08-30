@@ -19,6 +19,8 @@ RadarOS P4 zamienia moduł ESP32-P4 z 7-calowym ekranem dotykowym w samodzielną
 - [Sprzęt](#sprzęt)
 - [Szybki start](#szybki-start)
 - [Panel konfiguracyjny WWW](#panel-konfiguracyjny-www)
+- [Integracja Home Assistant / MQTT](#integracja-home-assistant--mqtt)
+- [Stan połączenia na ekranie](#stan-połączenia-na-ekranie)
 - [Źródła danych](#źródła-danych)
 - [Nota prawna i licencja](#nota-prawna-i-licencja)
 
@@ -30,10 +32,12 @@ RadarOS P4 zamienia moduł ESP32-P4 z 7-calowym ekranem dotykowym w samodzielną
 - **Dwutorowy silnik danych** — jednoczesna obsługa dekoderów ADS-B w czasie rzeczywistym oraz chmurowych źródeł Wi-Fi (adsb.fi / airplanes.live), dzięki czemu stacja działa zarówno jako klient sieciowy, jak i przy lokalnym sprzęcie dekodującym.
 - **Globalna skategoryzowana baza lotnisk** — setki lotnisk na całym świecie podzielonych na **komunikacyjne (Commercial Hubs)**, **bazy wojskowe (Military Air Bases)** oraz **aerokluby i lądowiska (General Aviation)**, każda kategoria niezależnie przełączalna i renderowana wyłącznie w aktywnym zasięgu radaru — dla pełnej wydajności 60 FPS.
 - **Alarmy squawk awaryjnych** — natychmiastowy, pulsujący baner na całą szerokość HUD-u przy kodach transpondera **7700** (Emergency), **7600** (Awaria radia) i **7500** (Porwanie).
-- **Nowoczesny panel WWW z zakładkami** — responsywny ciemny interfejs w stylu kokpitu lotniczego (Radar i wyświetlacz · Lokalizacja · Sieć Wi-Fi · System) z automatycznym wykrywaniem trybu AP, który przełącza domyślną zakładkę na Wi-Fi, gdy urządzenie serwuje własny punkt dostępowy konfiguracyjny.
+- **Integracja Home Assistant / MQTT** — pełna dwukierunkowa kontrola stacji z Home Assistant przez MQTT Discovery: 11 automatycznie wykrywanych encji sterujących (jasność, zasięg, filtr ruchu, ruch naziemny, mapa, baner squawk, warstwa lotnisk + przełączniki per kategoria, długość śladu lotu, język, zdalny restart) oraz 8 encji telemetrii/bezpieczeństwa na żywo (liczba samolotów, alarm squawk i jego szczegóły, flaga aktywności wojskowej, najbliższy samolot, RSSI Wi-Fi, uptime, wolna pamięć). Zobacz [poniżej](#integracja-home-assistant--mqtt).
+- **Nowoczesny panel WWW z zakładkami** — responsywny ciemny interfejs w stylu kokpitu lotniczego w pięciu zakładkach (Radar i wyświetlacz · Lokalizacja · Sieć Wi-Fi · System · MQTT) z animowanymi przełącznikami w stylu iOS, automatycznym wykrywaniem trybu AP (domyślna zakładka Wi-Fi, gdy urządzenie serwuje własny punkt dostępowy) oraz odpytywaną na żywo diodą statusu MQTT.
 - **Interaktywny kwadratowy selektor lokalizacji** — mapa Leaflet o proporcjach dokładnie 1:1 do wskazania współrzędnych GPS stacji jednym dotknięciem.
-- **Kopia zapasowa i przywracanie konfiguracji JSON** — eksport jednym kliknięciem wszystkich ustawień z NVS do pliku `radar_config.json` oraz import przywracający lub klonujący konfigurację stacji.
-- **Bezprzewodowa aktualizacja firmware (Web OTA)** — układ dwóch 8 MB partycji OTA i wgrywanie firmware wprost z przeglądarki (wybierz plik `.bin`, obserwuj pasek postępu, automatyczny restart).
+- **Kopia zapasowa i przywracanie konfiguracji JSON** — eksport jednym kliknięciem wszystkich ustawień z NVS (bez danych logowania Wi-Fi/MQTT) do pliku `radar_config.json` oraz import przywracający lub klonujący konfigurację stacji.
+- **Bezprzewodowa aktualizacja firmware (Web OTA)** — układ dwóch 8 MB partycji OTA i wgrywanie firmware wprost z przeglądarki (wybierz plik `.bin`, obserwuj pasek postępu, automatyczny restart), z walidacją magic byte obrazu i zapisem w kawałkach bezpiecznym dla watchdoga.
+- **Stan połączenia na ekranie** — animowane dymki powiadomień dla zmian stanu Wi-Fi (AP/łączenie/połączono) i MQTT (łączenie/połączono/błąd) oraz stała dioda statusu HUD z efektem pulsowania/oddychania. Zobacz [poniżej](#stan-połączenia-na-ekranie).
 - **Bogata telemetria celów** — sanityzowane callsigny, automatyczne oznaczanie `[MIL]` ruchu wojskowego NATO/sojuszniczego, strzałki trendu wysokości (▲/▼), prędkość względem ziemi, kurs oraz kolorowane ślady lotu o konfigurowalnej długości historii.
 - **Interaktywne okienka statków i 3-stopniowy silnik zdjęć** — dotknięcie dowolnego celu pokazuje pełne parametry lotu wraz z prawdziwym zdjęciem egzemplarza (Planespotters / Airport-Data) lub zdjęciem poglądowym z Wikipedii dla danego typu.
 
@@ -86,12 +90,59 @@ Do każdej kolejnej aktualizacji firmware kabel nie jest już potrzebny: otwórz
 
 | Zakładka | Zawartość |
 |---|---|
-| **Radar i wyświetlacz** | Jasność ekranu, domyślny zasięg, limit celów, filtr ruchu (ALL/CIVIL/MIL), ruch naziemny, mapa w tle, baner alarmu squawk, checkboxy kategorii lotnisk, długość śladu lotu. |
-| **Lokalizacja** | Szerokość/długość geograficzna stacji z interaktywnym kwadratowym selektorem mapy. |
+| **Radar i wyświetlacz** | Jasność ekranu, domyślny zasięg, limit celów, filtr ruchu (ALL/CIVIL/MIL), ruch naziemny, mapa w tle, baner alarmu squawk, warstwa lotnisk + przełączniki per kategoria (Komercyjne/Wojskowe/Aerokluby), długość śladu lotu. |
+| **Lokalizacja** | Szerokość/długość geograficzna stacji z interaktywnym kwadratowym (1:1) selektorem mapy. |
 | **Sieć Wi-Fi** | SSID/hasło, skaner sieci, aktualny status połączenia i adres IP. |
-| **System** | Język (English/Polski), nazwa stacji, wersja firmware, kopia zapasowa/przywracanie konfiguracji, aktualizacja Web OTA. |
+| **System** | Język (English/Polski), nazwa stacji, wersja firmware, kopia zapasowa/przywracanie konfiguracji JSON, aktualizacja firmware przez Web OTA. |
+| **MQTT** | Włączenie MQTT, host/port/login/hasło brokera, prefiks topików (node ID Home Assistant), przełącznik Home Assistant Auto-Discovery oraz odpytywana na żywo dioda statusu połączenia. |
 
-Wszystkie ustawienia są trwale zapisywane w NVS i przetrwają restart; stała stopka na dole formularza pokazuje aktualną wersję firmware na każdej zakładce.
+Wszystkie ustawienia binarne używają animowanych przełączników w stylu iOS. Każde ustawienie jest trwale zapisywane w NVS i przetrwa restart; stała stopka na dole formularza pokazuje aktualną wersję firmware na każdej zakładce.
+
+## Integracja Home Assistant / MQTT
+
+Włącz MQTT w zakładce **MQTT**, wskaż swojego brokera, a RadarOS P4 opublikuje trwałe (retained) topiki konfiguracyjne [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) zaraz po połączeniu — stacja i wszystkie jej encje pojawią się automatycznie pod jedną kartą urządzenia, bez potrzeby pisania YAML.
+
+**Dostępność i ponowne łączenie:** Last Will and Testament (`homeassistant/sensor/<node_id>/status/state`, `online`/`offline`) utrzymuje poprawny status dostępności każdej encji nawet przy nagłym rozłączeniu (zanik Wi-Fi, utrata zasilania); klient łączy się z brokerem ponownie automatycznie.
+
+**Encje sterujące** (zmiana natychmiast z poziomu Home Assistant, odzwierciedlana na żywo na ekranie dotykowym i odwrotnie):
+
+| Encja | Typ | Opcje |
+|---|---|---|
+| Jasność ekranu | `number` | 10–100% |
+| Zasięg radaru | `select` | 10 / 20 / 30 / 50 / 100 / 150 / 200 / 250 km |
+| Filtr ruchu | `select` | All / Civil Only / Military & Rescue |
+| Ruch naziemny | `switch` | Pokaż / Ukryj |
+| Mapa w tle | `switch` | Wł. / Wył. |
+| Baner alarmu Squawk | `switch` | Wł. / Wył. |
+| Warstwa lotnisk | `switch` | Wł. / Wył. |
+| Lotniska komercyjne / wojskowe / aerokluby | `switch` ×3 | Wł. / Wył. per kategoria |
+| Długość śladu lotu | `select` | Short / Medium / Long / Maximum |
+| Język interfejsu | `select` | English / Polski |
+| Restart urządzenia | `button` | Restartuje ESP32-P4 |
+
+**Sensory** (publikowane przy każdej zmianie oraz co ~10 s):
+
+| Encja | Opis |
+|---|---|
+| Liczba samolotów | Cele aktualnie w zasięgu, z atrybutami szczegółowymi |
+| Alarm Squawk | Sensor binarny, `ON` gdy aktywny kod 7700/7600/7500 |
+| Szczegóły alarmu | Callsign, kod squawk i typ alarmu |
+| Aktywność wojskowa | Sensor binarny dla pobliskiego ruchu wojskowego |
+| Najbliższy samolot | Callsign z atrybutami typu/dystansu/wysokości |
+| Sygnał Wi-Fi | RSSI w dBm |
+| Czas działania | Sekundy od uruchomienia |
+| Wolna pamięć | Wolna pamięć heap w kB |
+
+Zmiana nazwy stacji w zakładce **System** aktualizuje nazwę urządzenia w Home Assistant po kolejnym restarcie; prefiks topików MQTT / node ID konfiguruje się niezależnie w zakładce **MQTT**.
+
+## Stan połączenia na ekranie
+
+Dwa półprzezroczyste, zaokrąglone dymki powiadomień (ciemne tło, neonowo-zielona/turkusowa ramka, spójne ze stylem kokpitu) informują na ekranie dotykowym o stanie połączeń podczas konfiguracji i ponownych prób łączenia, bez zaśmiecania widoku radaru:
+
+- **Dymek Wi-Fi** — pokazuje SSID/hasło/adres URL SoftAP w trybie konfiguracji (trwale), komunikat „Łączenie z Wi-Fi…” podczas dołączania do zapisanej sieci oraz zielony komunikat „Połączono! IP: …”, który znika automatycznie po ~3,5 s.
+- **Dymek MQTT** — analogicznie dla połączenia z brokerem (turkusowe „Łączenie…”, zielone „Połączono!” znikające po ~3,5 s, bursztynowo-czerwone „Błąd połączenia / ponawianie…” znikające po ~5 s); widoczny tylko, gdy MQTT jest włączone, i wyciszany podczas zaniku Wi-Fi, aby uniknąć powielania alarmu.
+
+Stała **dioda statusu HUD** w lewym dolnym rogu radaru (zastępująca dawny wskaźnik zasięgu — zasięg jest już widoczny na przycisku `RNG` i na okręgach radaru) pokazuje małe pulsujące/oddychające diody LED: zielona i wolna przy połączeniu, żółta i szybka podczas łączenia, czerwona i migająca przy błędzie — jedna dla Wi-Fi i druga dla MQTT, widoczna tylko, gdy MQTT jest włączone.
 
 ## Źródła danych
 
