@@ -16,7 +16,10 @@
 #define MQTT_USER_LEN      32
 #define MQTT_PASS_LEN      64
 #define MQTT_DEVICE_ID_LEN 32
-#define OTA_VERSION_URL_LEN 192
+// Scratch buffer size for a single form field parsed out of the web panel's
+// settings POST body (save_post_handler in wifi_manager.c) - sized for the
+// largest field.
+#define WEB_FORM_PARAM_LEN 192
 
 extern float g_radar_lat;
 extern float g_radar_lon;
@@ -31,12 +34,6 @@ extern uint16_t g_mqtt_port;
 extern char g_mqtt_user[MQTT_USER_LEN];
 extern char g_mqtt_pass[MQTT_PASS_LEN];
 extern char g_mqtt_device_id[MQTT_DEVICE_ID_LEN];
-
-// HTTPS URL of the version.json manifest checked by ota_update_service.c
-// (e.g. a raw GitHub URL to "version.json" in the firmware repo). Empty by
-// default - ota_update_get_manifest_url() then falls back to
-// DEFAULT_OTA_MANIFEST_URL, so the checker is active out of the box.
-extern char g_ota_version_url[OTA_VERSION_URL_LEN];
 
 // Serializes every outbound HTTPS request across the app (ADS-B polling,
 // map tile fetches). Each mbedTLS handshake needs a sizable chunk of

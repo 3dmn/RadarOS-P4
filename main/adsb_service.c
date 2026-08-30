@@ -370,7 +370,11 @@ void adsb_service_unlock(void) {
     xSemaphoreGive(g_data_mutex);
 }
 
-static volatile bool s_adsb_paused = false;
+// Starts paused - the very first request must never race map_tile_service.c
+// for the shared HTTPS mutex/SDIO bandwidth at boot. adsb_service_resume()
+// (called by map_tile_service.c once the initial tile grid finishes) is
+// what unblocks the first fetch.
+static volatile bool s_adsb_paused = true;
 static TaskHandle_t s_adsb_task_handle = NULL;
 // Set by adsb_service_request_immediate_fetch() - the next successful fetch
 // hides the map/ADS-B loading bubble (radar_ui_hide_loading()) and clears
@@ -453,11 +457,12 @@ static void adsb_worker_task(void *pvParameters) {
 
     while (1) {
         if (s_adsb_paused || map_tile_is_downloading()) {
-            // Blocks until either the 500 ms poll expires, or
-            // adsb_service_request_immediate_fetch() wakes us the instant
-            // map_tile_service.c's sequential map fetch finishes and calls
-            // adsb_service_resume().
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+            // Blocks indefinitely - no periodic poll, no fetch is ever
+            // attempted here. adsb_service_request_immediate_fetch() wakes
+            // us the instant map_tile_service.c's sequential map fetch
+            // finishes and calls adsb_service_resume().
+            ESP_LOGI(TAG, "ADS-B worker waiting for map tiles completion...");
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
 

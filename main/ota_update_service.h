@@ -2,10 +2,9 @@
 
 #include <stdbool.h>
 
-// Built-in fallback for the version.json manifest URL, used whenever the
-// System tab's "Version Check URL" field is left empty in NVS - the update
-// checker is active out of the box, no configuration required.
-#define DEFAULT_OTA_MANIFEST_URL "https://raw.githubusercontent.com/vmisiek/RadarOS-P4/main/version.json"
+// Version.json manifest URL - hardcoded, not user-configurable (the web
+// panel no longer exposes a "Version Check URL" field).
+#define OTA_VERSION_CHECK_URL "https://raw.githubusercontent.com/vmisiek/RadarOS-P4/main/version.json"
 
 // Starts the background task that periodically fetches the version.json
 // manifest at ota_update_get_manifest_url() -
@@ -51,7 +50,7 @@ const char *ota_update_get_release_url(void);
 // if unknown.
 const char *ota_update_get_release_notes(void);
 
-// The manifest URL actually in effect: g_ota_version_url (wifi_manager.h)
-// if the user configured one, otherwise DEFAULT_OTA_MANIFEST_URL. Always
-// non-empty - the update checker is active by default.
+// Always returns OTA_VERSION_CHECK_URL - kept as a function (rather than
+// callers using the macro directly) since it used to also honor a
+// user-configured override.
 const char *ota_update_get_manifest_url(void);

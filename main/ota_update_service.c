@@ -219,5 +219,5 @@ const char *ota_update_get_release_notes(void) {
 }
 
 const char *ota_update_get_manifest_url(void) {
-    return g_ota_version_url[0] ? g_ota_version_url : DEFAULT_OTA_MANIFEST_URL;
+    return OTA_VERSION_CHECK_URL;
 }

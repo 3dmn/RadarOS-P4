@@ -93,7 +93,6 @@ uint16_t g_mqtt_port = MQTT_PORT_DEFAULT;
 char g_mqtt_user[MQTT_USER_LEN] = "";
 char g_mqtt_pass[MQTT_PASS_LEN] = "";
 char g_mqtt_device_id[MQTT_DEVICE_ID_LEN] = MQTT_DEVICE_ID_DEFAULT;
-char g_ota_version_url[OTA_VERSION_URL_LEN] = "";
 SemaphoreHandle_t g_https_mutex = NULL;
 
 static bool is_valid_trail_len(uint8_t len) {
@@ -200,9 +199,6 @@ static void load_settings_from_nvs(void) {
     if (g_mqtt_device_id[0] == '\0') {
         snprintf(g_mqtt_device_id, sizeof(g_mqtt_device_id), "%s", MQTT_DEVICE_ID_DEFAULT);
     }
-    len = sizeof(g_ota_version_url);
-    nvs_get_str(my_handle, "ota_url", g_ota_version_url, &len);
-
     nvs_close(my_handle);
     ESP_LOGI(TAG, "Loaded from NVS: SSID='%s' station='%s' (%.6f, %.6f)",
              g_wifi_ssid, g_station_name, g_radar_lat, g_radar_lon);
@@ -236,7 +232,6 @@ static void save_settings_to_nvs(void) {
     nvs_set_str(my_handle, "mqtt_user", g_mqtt_user);
     nvs_set_str(my_handle, "mqtt_pass", g_mqtt_pass);
     nvs_set_str(my_handle, "mqtt_devid", g_mqtt_device_id);
-    nvs_set_str(my_handle, "ota_url", g_ota_version_url);
     nvs_commit(my_handle);
     nvs_close(my_handle);
 }
@@ -759,8 +754,8 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "</div>",
         T(STR_WEB_OTA_SECTION), T(STR_WEB_OTA_FILE_LABEL), T(STR_WEB_OTA_BTN));
 
-    // Firmware update check (version.json manifest) - always active, falls
-    // back to DEFAULT_OTA_MANIFEST_URL when no URL is configured in NVS.
+    // Firmware update check (version.json manifest) - always active, fetched
+    // from the hardcoded OTA_VERSION_CHECK_URL.
     {
         bool upd_avail = ota_update_is_available();
         const char *latest = ota_update_get_latest_version();
@@ -780,9 +775,6 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
             "<label style='color:#00ff88;font-weight:bold;'>\xF0\x9F\x94\x84 %s</label>"
             "<div class='statrow'><span>%s</span><span>v%s</span></div>"
             "<div class='statrow'><span>%s</span><span id='latest_version_label'>%s</span></div>"
-            "<label style='margin-top:8px;'>%s</label>"
-            "<input type='text' id='ota_url_input' name='ota_url' value='%s' maxlength='191' placeholder='https://.../version.json'>"
-            "<label style='margin-top:2px;'>%s</label>"
             "<button type='button' class='geobtn' style='margin-top:10px;' id='btn_check_update' onclick='checkOtaUpdate(event)'>%s</button>"
             "<p id='check-update-status' class='hint'></p>"
             "<a id='btn_download_update' href='%s' target='_blank' rel='noopener' class='geobtn' "
@@ -792,8 +784,6 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
             T(STR_WEB_FWUPD_SECTION),
             T(STR_WEB_FWUPD_CURRENT), ota_update_get_installed_version(),
             T(STR_WEB_FWUPD_LATEST), latest_line,
-            T(STR_WEB_FWUPD_REPO), ota_update_get_manifest_url(),
-            T(STR_WEB_FWUPD_REPO_HINT),
             T(STR_WEB_FWUPD_CHECK_BTN),
             release_url, upd_avail ? "block" : "none", download_btn_label,
             upd_avail ? "block" : "none", T(STR_WEB_FWUPD_DOWNLOAD_HINT));
@@ -984,12 +974,10 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "if(e){e.preventDefault();e.stopPropagation();}"
         "var st=document.getElementById('check-update-status');"
         "var lbl=document.getElementById('latest_version_label');"
-        "var urlInput=document.getElementById('ota_url_input');"
         "var btn=document.getElementById('btn_check_update');"
         "if(btn)btn.disabled=true;"
         "st.textContent=I18N.fwChecking;"
-        "var q=urlInput?('?url='+encodeURIComponent(urlInput.value)):'';"
-        "fetch('/check_update'+q,{method:'POST'}).then(function(r){return r.json();}).then(function(d){"
+        "fetch('/check_update',{method:'POST'}).then(function(r){return r.json();}).then(function(d){"
         "if(btn)btn.disabled=false;"
         "st.textContent='';"
         "if(lbl){"
@@ -1086,7 +1074,7 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     }
     buf[received] = '\0';
 
-    char param[OTA_VERSION_URL_LEN];
+    char param[WEB_FORM_PARAM_LEN];
     if (httpd_query_key_value(buf, "ssid", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
         snprintf(g_wifi_ssid, sizeof(g_wifi_ssid), "%s", param);
@@ -1178,10 +1166,6 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         url_decode(param);
         mqtt_sanitize_topic_id(param, g_mqtt_device_id, sizeof(g_mqtt_device_id));
     }
-    if (httpd_query_key_value(buf, "ota_url", param, sizeof(param)) == ESP_OK) {
-        url_decode(param);
-        snprintf(g_ota_version_url, sizeof(g_ota_version_url), "%s", param);
-    }
     free(buf);
 
     save_settings_to_nvs();
@@ -1222,7 +1206,6 @@ static esp_err_t export_config_get_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(root, "mqtt_user", g_mqtt_user);
     cJSON_AddStringToObject(root, "mqtt_device_id", g_mqtt_device_id);
     cJSON_AddNumberToObject(root, "mqtt_ha_discovery", g_mqtt_ha_discovery);
-    cJSON_AddStringToObject(root, "ota_url", g_ota_version_url);
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1346,9 +1329,6 @@ static esp_err_t import_config_post_handler(httpd_req_t *req) {
     }
     if ((item = cJSON_GetObjectItem(root, "mqtt_ha_discovery")) && cJSON_IsNumber(item)) {
         g_mqtt_ha_discovery = (item->valueint == 1) ? 1 : 0;
-    }
-    if ((item = cJSON_GetObjectItem(root, "ota_url")) && cJSON_IsString(item)) {
-        snprintf(g_ota_version_url, sizeof(g_ota_version_url), "%s", item->valuestring);
     }
     cJSON_Delete(root);
 
@@ -1624,30 +1604,11 @@ static esp_err_t mqtt_status_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// Optionally applies an updated "?url=..." query parameter (so an edited
-// but not-yet-saved manifest URL field is honored without a full form
-// submit) before performing a blocking, out-of-cycle firmware version
-// check. Responds with the fresh version state as JSON so the browser can
-// update the System tab in place instead of reloading the page (which
-// would also reset the currently open tab).
+// Performs a blocking, out-of-cycle firmware version check against the
+// hardcoded OTA_VERSION_CHECK_URL manifest. Responds with the fresh version
+// state as JSON so the browser can update the System tab in place instead
+// of reloading the page (which would also reset the currently open tab).
 static esp_err_t check_update_post_handler(httpd_req_t *req) {
-    char query[512];
-    if (httpd_req_get_url_query_len(req) > 0 &&
-        httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        char param[OTA_VERSION_URL_LEN];
-        if (httpd_query_key_value(query, "url", param, sizeof(param)) == ESP_OK) {
-            url_decode(param);
-            // Compares against the effective URL (default manifest included)
-            // so leaving the pre-filled default untouched never writes to
-            // NVS - only an actual user edit is persisted.
-            if (strcmp(param, ota_update_get_manifest_url()) != 0) {
-                snprintf(g_ota_version_url, sizeof(g_ota_version_url), "%s", param);
-                save_settings_to_nvs();
-                ESP_LOGI(TAG, "Version check URL updated via web panel: %s", g_ota_version_url);
-            }
-        }
-    }
-
     ota_update_check_now(); // blocking - see doc comment in ota_update_service.h
 
     cJSON *root = cJSON_CreateObject();

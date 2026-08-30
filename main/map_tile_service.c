@@ -61,8 +61,11 @@ static volatile uint32_t s_generation = 0;
 static volatile int s_current_zoom = -1;
 // True for the duration of an active tile grid fetch - see
 // map_tile_is_downloading() and the sequential map-then-ADS-B fetch in
-// process_reload() below.
-static volatile bool s_is_downloading = false;
+// process_reload() below. Starts true so adsb_service.c's worker task (which
+// starts paused too) never races the very first boot-time tile grid for the
+// shared HTTPS mutex/SDIO bandwidth before process_reload() has even run
+// once.
+static volatile bool s_is_downloading = true;
 
 // Standard Slippy Map (Web Mercator) projection. tile_y grows southward -
 // a more northern latitude (larger lat_deg) always yields a *smaller*
@@ -172,21 +175,18 @@ static void darken_and_blit_tile(const uint8_t *rgb, int tile_w, int tile_h, int
     uint16_t *dst = (uint16_t *)s_canvas_buf;
 
     for (int y = 0; y < tile_h; y++) {
-        // dst_y0 itself still uses the standard, un-negated Slippy Map
-        // grid placement (see process_reload() below - tile_y and screen Y
-        // both grow southward, so tiles are arranged in the right N/S
-        // order). Confirmed on the physical panel, though: this device's
-        // LVGL canvas + display pipeline presents the raw s_canvas_buf
-        // bottom-up as a whole block, unlike the normally-drawn overlay
-        // widgets (aircraft, airports, range rings, HUD text) - so the map
-        // background alone came out mirrored relative to everything drawn
-        // on top of it. Writing each tile's rows to their mirrored
-        // destination row here (tile_h - 1 - y) compensates for that.
-        int dy = dst_y0 + (tile_h - 1 - y);
-        if (dy < 0 || dy >= MAP_SIZE) continue;
+        // Tile grid placement (dst_y0, process_reload() below) is correct
+        // top-down - confirmed on the physical panel: the tile grid itself
+        // (N/S order) is right. But the pixel content *within* each tile
+        // (OSM labels/text) renders upside down with a direct row copy, so
+        // the source row is read back-to-front here. See the MAP RENDERING
+        // rule in CLAUDE.md.
+        int src_y = tile_h - 1 - y;
+        int canvas_y = dst_y0 + y;
+        if (canvas_y < 0 || canvas_y >= MAP_SIZE) continue;
 
-        const uint8_t *src_row = rgb + (size_t)y * tile_w * 3;
-        uint16_t *dst_row = dst + (size_t)dy * MAP_SIZE;
+        const uint8_t *src_row = rgb + (size_t)src_y * tile_w * 3;
+        uint16_t *dst_row = dst + (size_t)canvas_y * MAP_SIZE;
 
         for (int x = 0; x < tile_w; x++) {
             int dx = dst_x0 + x;
