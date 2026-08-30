@@ -12,6 +12,7 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 
 #include "bsp/esp32_p4_wifi6_touch_lcd_7b.h"
 #include "lvgl.h"
@@ -37,6 +38,10 @@ static const char *TAG = "MAP_TILE_SVC";
 #define MAP_MIN_ZOOM              2
 #define MAP_MAX_ZOOM             18
 #define MAP_BRIGHTNESS_PCT       58
+// Coalesces rapid successive map_tile_service_request_reload() calls (e.g.
+// quick RNG clicks) into a single tile grid fetch, started this long after
+// the last call - see s_debounce_timer.
+#define MAP_RELOAD_DEBOUNCE_US   (1500 * 1000)
 
 typedef struct {
     float lat;
@@ -45,6 +50,8 @@ typedef struct {
 } map_reload_req_t;
 
 static QueueHandle_t s_req_queue;
+static esp_timer_handle_t s_debounce_timer = NULL;
+static map_reload_req_t s_pending_req;
 static lv_obj_t *s_canvas = NULL;
 static uint8_t *s_canvas_buf = NULL;
 static bool s_enabled = true;
@@ -298,6 +305,9 @@ static void process_reload(float lat, float lon, float range_km, uint32_t my_gen
             if (!got_tile) {
                 ESP_LOGW(TAG, "Tile fetch failed: %s (status %d)", url, status);
                 heap_caps_free(png_buf);
+                // Extra end-of-iteration pacing so the SDIO/lwIP stack has a
+                // full window to release RX buffers before the next tile.
+                vTaskDelay(pdMS_TO_TICKS(50));
                 continue;
             }
 
@@ -319,6 +329,9 @@ static void process_reload(float lat, float lon, float range_km, uint32_t my_gen
             if (!rgb || w <= 0 || h <= 0) {
                 if (rgb) stbi_image_free(rgb);
                 ESP_LOGW(TAG, "PNG decode failed for tile %d/%d/%d", zoom, tx, ty);
+                // Extra end-of-iteration pacing so the SDIO/lwIP stack has a
+                // full window to release RX buffers before the next tile.
+                vTaskDelay(pdMS_TO_TICKS(50));
                 continue;
             }
 
@@ -338,6 +351,11 @@ static void process_reload(float lat, float lon, float range_km, uint32_t my_gen
             // its DMA buffers a full window to drain before the next TLS
             // handshake starts.
             vTaskDelay(pdMS_TO_TICKS(80));
+
+            // End-of-iteration pacing, on top of the above - extra headroom
+            // for the ESP-Hosted driver to fully release RX buffers back to
+            // its mempool before the next tile's request.
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
 
@@ -349,7 +367,12 @@ static void process_reload(float lat, float lon, float range_km, uint32_t my_gen
         // bubble as-is, since the newer generation's process_reload() call
         // already re-armed both (it called adsb_service_pause() and
         // radar_ui_show_map_loading() again at its own start) and will run
-        // this same completion sequence itself once it finishes.
+        // this same completion sequence itself once it finishes. Every tile
+        // fetch (see http_get_tile()) already closes/cleans up its HTTP
+        // client before returning, so there is no lingering open connection
+        // to tear down here - just let any in-flight TCP packets drain off
+        // the SDIO bus before the newer generation's grid starts fetching.
+        vTaskDelay(pdMS_TO_TICKS(100));
         return;
     }
 
@@ -397,6 +420,20 @@ static void map_worker_task(void *arg) {
     }
 }
 
+// Fires MAP_RELOAD_DEBOUNCE_US after the last map_tile_service_request_
+// reload() call with no further call in between - this is what actually
+// enqueues the fetch for map_worker_task, so a burst of rapid RNG/zoom
+// changes only ever triggers one tile grid download.
+static void debounce_timer_cb(void *arg) {
+    (void)arg;
+    if (!s_req_queue) return;
+    // See s_generation - lets an in-flight process_reload() for a
+    // previous request (e.g. before the user changed RNG/zoom) notice it
+    // is now stale and abort instead of finishing a wasted tile grid.
+    s_generation++;
+    xQueueOverwrite(s_req_queue, &s_pending_req);
+}
+
 bool map_tile_service_init(void) {
     self_check_tile_y_orientation();
 
@@ -412,6 +449,15 @@ bool map_tile_service_init(void) {
     s_req_queue = xQueueCreate(1, sizeof(map_reload_req_t));
     if (!s_req_queue) {
         ESP_LOGE(TAG, "Failed to create map_tile_service queue!");
+        return false;
+    }
+
+    const esp_timer_create_args_t debounce_timer_args = {
+        .callback = debounce_timer_cb,
+        .name = "map_reload_debounce",
+    };
+    if (esp_timer_create(&debounce_timer_args, &s_debounce_timer) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create map reload debounce timer!");
         return false;
     }
 
@@ -436,13 +482,12 @@ void map_tile_service_set_canvas_parent(lv_obj_t *radar_area) {
 }
 
 void map_tile_service_request_reload(float center_lat, float center_lon, float range_km) {
-    if (!s_req_queue) return;
-    // See s_generation - lets an in-flight process_reload() for a
-    // previous request (e.g. before the user changed RNG/zoom) notice it
-    // is now stale and abort instead of finishing a wasted tile grid.
-    s_generation++;
-    map_reload_req_t req = { .lat = center_lat, .lon = center_lon, .range_km = range_km };
-    xQueueOverwrite(s_req_queue, &req);
+    if (!s_req_queue || !s_debounce_timer) return;
+    s_pending_req.lat = center_lat;
+    s_pending_req.lon = center_lon;
+    s_pending_req.range_km = range_km;
+    esp_timer_stop(s_debounce_timer); // ESP_ERR_INVALID_STATE if not running - fine, ignored
+    esp_timer_start_once(s_debounce_timer, MAP_RELOAD_DEBOUNCE_US);
 }
 
 void map_tile_service_set_enabled(bool on) {

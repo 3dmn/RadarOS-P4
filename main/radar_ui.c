@@ -682,6 +682,13 @@ static void apply_range_index(int idx) {
 }
 
 static void switch_range(void) {
+    if (map_tile_is_downloading()) {
+        // Ignore the click outright instead of queuing/debouncing it - a
+        // range change mid-download would supersede the in-flight tile grid
+        // and restart fetching, on top of an already-active TLS session.
+        ESP_LOGW(TAG, "RNG change blocked - map tiles downloading");
+        return;
+    }
     apply_range_index((current_range_idx + 1) % NUM_RANGE_STEPS);
 }
 

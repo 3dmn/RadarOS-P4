@@ -23,6 +23,7 @@
 #include "adsb_service.h"
 #include "aircraft_types.h"
 #include "ota_update_service.h"
+#include "map_tile_service.h"
 
 static const char *TAG = "MQTT_SVC";
 
@@ -575,7 +576,14 @@ static void handle_command(const char *topic, const char *payload) {
     if (topic_is(topic, "number", "brightness")) {
         wifi_mgr_set_brightness((uint8_t)atoi(payload));
     } else if (topic_is(topic, "select", "range")) {
-        radar_ui_set_range_km((float)atof(payload));
+        // Ignored outright while a tile grid is actively downloading - a
+        // range change would supersede it and restart fetching on top of an
+        // already-active TLS session, destabilizing the current transfer.
+        if (map_tile_is_downloading()) {
+            ESP_LOGW(TAG, "MQTT range change ignored - map tiles downloading");
+        } else {
+            radar_ui_set_range_km((float)atof(payload));
+        }
     } else if (topic_is(topic, "select", "air_filter")) {
         radar_ui_set_air_filter(air_filter_from_label(payload));
     } else if (topic_is(topic, "switch", "gnd")) {

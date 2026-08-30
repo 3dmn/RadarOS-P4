@@ -17,9 +17,10 @@ bool map_tile_service_init(void);
 void map_tile_service_set_canvas_parent(lv_obj_t *radar_area);
 
 // Requests (asynchronously, in the background) a tile reload for the given
-// radar center and range. A new call before the previous one finishes
-// overwrites the queued request - only the most recently requested view
-// matters.
+// radar center and range. Debounced: the actual fetch only starts 1.5s
+// after the last call with no further call in between, so a burst of rapid
+// RNG/zoom changes triggers only one tile grid download instead of one per
+// call - see MAP_RELOAD_DEBOUNCE_US in map_tile_service.c.
 void map_tile_service_request_reload(float center_lat, float center_lon, float range_km);
 
 // Shows/hides the map layer (the tile-fetching task keeps running).
