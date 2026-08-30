@@ -26,6 +26,12 @@ void map_tile_service_request_reload(float center_lat, float center_lon, float r
 void map_tile_service_set_enabled(bool on);
 bool map_tile_service_is_enabled(void);
 
+// OSM zoom level of the tile grid currently drawn on the canvas - lets
+// other modules (e.g. radar_geo_to_screen_px() in radar_ui.c) project
+// lat/lon to screen pixels with the exact same Web Mercator zoom the map
+// background itself is rendered at. -1 if no reload has completed yet.
+int map_tile_service_get_current_zoom(void);
+
 // Suspends/resumes tile fetching (the worker task keeps running, it just
 // skips fetching and sleeps) - used by ota_update_service.c to keep this
 // task off the network entirely while esp_https_ota() is streaming/

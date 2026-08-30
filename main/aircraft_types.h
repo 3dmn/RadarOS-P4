@@ -87,5 +87,9 @@ typedef struct {
 
 // Airport database (global_airports) moved to main/airports.h / airports.c.
 
-static const float range_steps[] = {250.0f, 200.0f, 150.0f, 100.0f, 50.0f, 30.0f, 20.0f, 10.0f};
+// Radar range steps in km, widest first (index 0 is the default/initial
+// range) - each one maps 1:1 to a fixed OSM zoom level in
+// map_tile_service.c's RANGE_TO_ZOOM table. Keep in sync with
+// RADAR_RANGE_STEPS_KM in wifi_manager.c and RANGE_OPTIONS in mqtt_service.c.
+static const float range_steps[] = {400.0f, 200.0f, 100.0f, 50.0f, 25.0f};
 #define NUM_RANGE_STEPS (sizeof(range_steps) / sizeof(range_steps[0]))

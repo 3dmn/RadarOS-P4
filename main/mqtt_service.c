@@ -205,7 +205,7 @@ static void unpublish_removed_entities(void) {
     esp_mqtt_client_publish(s_client, state_topic, "", 0, 1, 1);
 }
 
-static const char *RANGE_OPTIONS[] = {"10 km", "20 km", "30 km", "50 km", "100 km", "150 km", "200 km", "250 km"};
+static const char *RANGE_OPTIONS[] = {"25 km", "50 km", "100 km", "200 km", "400 km"};
 static const char *AIR_FILTER_OPTIONS[] = {"All", "Civil Only", "Military & Rescue"};
 static const char *TRAIL_LEN_OPTIONS[] = {"Short", "Medium", "Long", "Maximum"};
 static const char *LANGUAGE_OPTIONS[] = {"English", "Polski"};

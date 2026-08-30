@@ -18,6 +18,10 @@ CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+# CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL intentionally left unset - every
+# tested override (64/128/192 KB) either starved the ESP-Hosted SDIO driver
+# or the LVGL/Waveshare DSI display driver's own internal-RAM allocations
+# at boot. The ESP-IDF default for this BSP is the stable, tested value.
 
 CONFIG_CACHE_L2_CACHE_256KB=y
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
@@ -36,15 +40,22 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
 
-# Push Wi-Fi/lwIP network buffers and FreeRTOS task stacks into PSRAM too -
-# internal SRAM is what the Wi-Fi SDIO driver needs for its own DMA
-# buffers ("sdio_rx_get_buffer"), so nothing else should compete for it.
-# CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL stays at 0 (see above) - that already
-# routes every malloc() to PSRAM regardless of size, which is stricter
-# (more PSRAM-favoring) than a raised 256 B threshold would be.
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+# Full 16 KB inbound TLS record buffer - shrinking this to 8 KB caused
+# MBEDTLS_ERR_SSL_BUFFER_TOO_SMALL (-0x7100) on ADS-B responses carrying a
+# large aircraft list in a single TLS record. It is PSRAM-backed (see
+# CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC/CONFIG_MBEDTLS_DYNAMIC_BUFFER above), so
+# the full size does not cost internal SRAM.
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP and CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+# were tried here and removed - they conflicted with the ESP-Hosted SDIO
+# driver's own buffer allocation (heap corruption) and with the LVGL/
+# Waveshare DSI display driver's startup allocation. g_https_mutex (see
+# wifi_manager.h) already serializes every HTTPS/TLS session in the app,
+# which is what actually protects the SDIO driver's DMA buffers.
 
 # Konfiguracja wyswietlacza LVGL
 CONFIG_LV_USE_CLIB_MALLOC=y

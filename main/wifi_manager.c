@@ -40,7 +40,7 @@
 #define BRIGHTNESS_DEFAULT      100
 #define BRIGHTNESS_MIN          10
 #define BRIGHTNESS_MAX          100
-#define DEFAULT_RANGE_DEFAULT   250
+#define DEFAULT_RANGE_DEFAULT   400
 #define AIR_MODE_DEFAULT        0
 #define APTS_MODE_DEFAULT       1
 #define APT_FILTER_MASK_DEFAULT APT_TYPE_ALL
@@ -100,6 +100,19 @@ static bool is_valid_trail_len(uint8_t len) {
     return len == 0 || len == 15 || len == 30 || len == 60 || len == 120;
 }
 
+// Radar range steps in km - must stay in sync with range_steps[] in
+// aircraft_types.h (HUD cycling order), the MQTT Discovery select options
+// in mqtt_service.c, and the map zoom lookup table in map_tile_service.c.
+static const uint16_t RADAR_RANGE_STEPS_KM[] = {25, 50, 100, 200, 400};
+#define RADAR_RANGE_STEPS_COUNT (sizeof(RADAR_RANGE_STEPS_KM) / sizeof(RADAR_RANGE_STEPS_KM[0]))
+
+static bool is_valid_range_km(uint16_t km) {
+    for (size_t i = 0; i < RADAR_RANGE_STEPS_COUNT; i++) {
+        if (RADAR_RANGE_STEPS_KM[i] == km) return true;
+    }
+    return false;
+}
+
 static uint16_t clamp_max_aircraft(uint16_t v) {
     if (v > MAX_AIRCRAFT_MAX) v = MAX_AIRCRAFT_MAX;
     if (v < MAX_AIRCRAFT_MIN) v = MAX_AIRCRAFT_MIN;
@@ -131,13 +144,8 @@ static void load_settings_from_nvs(void) {
         g_brightness = BRIGHTNESS_DEFAULT;
     }
     nvs_get_u16(my_handle, "default_rng", &g_default_range);
-    {
-        static const uint16_t valid_ranges[] = {10, 20, 30, 50, 100, 150, 200, 250};
-        bool valid_rng = false;
-        for (size_t i = 0; i < sizeof(valid_ranges) / sizeof(valid_ranges[0]); i++) {
-            if (valid_ranges[i] == g_default_range) { valid_rng = true; break; }
-        }
-        if (!valid_rng) g_default_range = DEFAULT_RANGE_DEFAULT;
+    if (!is_valid_range_km(g_default_range)) {
+        g_default_range = DEFAULT_RANGE_DEFAULT;
     }
     nvs_get_u8(my_handle, "air_mode", &g_air_mode);
     if (g_air_mode > 2) {
@@ -250,12 +258,7 @@ int wifi_mgr_get_default_range(void) {
 }
 
 void wifi_mgr_set_default_range(uint16_t range_km) {
-    static const uint16_t valid_ranges[] = {10, 20, 30, 50, 100, 150, 200, 250};
-    bool valid = false;
-    for (size_t i = 0; i < sizeof(valid_ranges) / sizeof(valid_ranges[0]); i++) {
-        if (valid_ranges[i] == range_km) { valid = true; break; }
-    }
-    g_default_range = valid ? range_km : DEFAULT_RANGE_DEFAULT;
+    g_default_range = is_valid_range_km(range_km) ? range_km : DEFAULT_RANGE_DEFAULT;
     save_settings_to_nvs();
 }
 
@@ -590,16 +593,14 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 
     hb_append(&hb,
         "<div><label>%s</label><select name='rng'>"
-        "<option value='10' %s>10 km</option><option value='20' %s>20 km</option>"
-        "<option value='30' %s>30 km</option><option value='50' %s>50 km</option>"
-        "<option value='100' %s>100 km</option><option value='150' %s>150 km</option>"
-        "<option value='200' %s>200 km</option><option value='250' %s>250 km</option>"
+        "<option value='25' %s>25 km</option><option value='50' %s>50 km</option>"
+        "<option value='100' %s>100 km</option><option value='200' %s>200 km</option>"
+        "<option value='400' %s>400 km</option>"
         "</select></div>",
         T(STR_WEB_DEFAULT_RANGE),
-        g_default_range == 10 ? "selected" : "", g_default_range == 20 ? "selected" : "",
-        g_default_range == 30 ? "selected" : "", g_default_range == 50 ? "selected" : "",
-        g_default_range == 100 ? "selected" : "", g_default_range == 150 ? "selected" : "",
-        g_default_range == 200 ? "selected" : "", g_default_range == 250 ? "selected" : "");
+        g_default_range == 25 ? "selected" : "", g_default_range == 50 ? "selected" : "",
+        g_default_range == 100 ? "selected" : "", g_default_range == 200 ? "selected" : "",
+        g_default_range == 400 ? "selected" : "");
 
     hb_append(&hb,
         "<div><label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label>"
@@ -1116,12 +1117,7 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     if (httpd_query_key_value(buf, "rng", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
         int v = atoi(param);
-        static const uint16_t valid_ranges[] = {10, 20, 30, 50, 100, 150, 200, 250};
-        bool valid = false;
-        for (size_t i = 0; i < sizeof(valid_ranges) / sizeof(valid_ranges[0]); i++) {
-            if (valid_ranges[i] == v) { valid = true; break; }
-        }
-        g_default_range = valid ? (uint16_t)v : DEFAULT_RANGE_DEFAULT;
+        g_default_range = is_valid_range_km((uint16_t)v) ? (uint16_t)v : DEFAULT_RANGE_DEFAULT;
     }
     if (httpd_query_key_value(buf, "air_mode", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
@@ -1301,12 +1297,7 @@ static esp_err_t import_config_post_handler(httpd_req_t *req) {
     }
     if ((item = cJSON_GetObjectItem(root, "default_range")) && cJSON_IsNumber(item)) {
         int v = item->valueint;
-        static const uint16_t valid_ranges[] = {10, 20, 30, 50, 100, 150, 200, 250};
-        bool valid = false;
-        for (size_t i = 0; i < sizeof(valid_ranges) / sizeof(valid_ranges[0]); i++) {
-            if (valid_ranges[i] == v) { valid = true; break; }
-        }
-        g_default_range = valid ? (uint16_t)v : DEFAULT_RANGE_DEFAULT;
+        g_default_range = is_valid_range_km((uint16_t)v) ? (uint16_t)v : DEFAULT_RANGE_DEFAULT;
     }
     if ((item = cJSON_GetObjectItem(root, "air_mode")) && cJSON_IsNumber(item)) {
         int v = item->valueint;

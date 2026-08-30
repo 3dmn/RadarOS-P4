@@ -28,7 +28,41 @@ extern const lv_image_dsc_t aircraft_yellow_20;
 extern const lv_image_dsc_t aircraft_yellow_25;
 extern const lv_image_dsc_t helicopter_yellow_20;
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 static const char *TAG = "RADAR_UI";
+
+// Projects any lat/lon to a radar-relative screen pixel using the exact
+// same Web Mercator world-pixel math map_tile_service.c uses to place the
+// OSM tile background (latlon_to_tilef() there, TILE_SIZE=256), at the
+// zoom level the map is actually currently rendered at - not the separate
+// flat-earth (equirectangular) distance/bearing approximation the
+// aircraft/airport/trail drawing below uses. Kept available here as a
+// shared utility so any future caller can align pixel-for-pixel with the
+// map tiles instead of drifting from them at long range / high latitude.
+void radar_geo_to_screen_px(double lat, double lon, int *out_x, int *out_y) {
+    int zoom = map_tile_service_get_current_zoom();
+    // -1 ("no reload has completed yet") would make the shift below
+    // undefined behavior - fall back to a reasonable mid-range zoom.
+    if (zoom < 0) zoom = 8;
+    double n = (double)(1 << zoom);
+
+    double lon_deg = lon;
+    double lat_rad = lat * M_PI / 180.0;
+    double center_lon_deg = g_radar_lon;
+    double center_lat_rad = g_radar_lat * M_PI / 180.0;
+
+    double world_x = (lon_deg + 180.0) / 360.0 * n * 256.0;
+    double world_y = (1.0 - asinh(tan(lat_rad)) / M_PI) / 2.0 * n * 256.0;
+
+    double center_world_x = (center_lon_deg + 180.0) / 360.0 * n * 256.0;
+    double center_world_y = (1.0 - asinh(tan(center_lat_rad)) / M_PI) / 2.0 * n * 256.0;
+
+    *out_x = RADAR_CENTER_X + (int)round(world_x - center_world_x);
+    *out_y = RADAR_CENTER_Y + (int)round(world_y - center_world_y);
+}
 
 static int current_range_idx = 0;
 static air_filter_mode_t air_filter_mode = AIR_FILTER_ALL;
@@ -306,7 +340,6 @@ void radar_ui_refresh(void) {
 
     uint32_t now = get_time_ms();
     float current_range_km = range_steps[current_range_idx];
-    float scale = (float)RADAR_MAX_RADIUS / current_range_km;
     uint8_t trail_len = wifi_mgr_get_trail_len();
     uint16_t max_aircraft = wifi_mgr_get_max_aircraft();
     if (max_aircraft > MAX_AIRCRAFT_CAPACITY) max_aircraft = MAX_AIRCRAFT_CAPACITY;
@@ -335,14 +368,12 @@ void radar_ui_refresh(void) {
 
             ui_slots[i].calc_visible = true;
 
-            // Bearing 0 (north) must place the target ABOVE the center, i.e.
-            // a SMALLER py - matches the map canvas's tile_y convention in
-            // map_tile_service.c (north = smaller Y), so aircraft always
-            // line up with the map background underneath them. Do not swap
-            // this to "+" - that would put north-bound traffic below center.
-            float rad = live_fleet[i].bearing_deg * DEG_TO_RAD;
-            int px = RADAR_CENTER_X + (int)(live_fleet[i].distance_km * scale * sinf(rad));
-            int py = RADAR_CENTER_Y - (int)(live_fleet[i].distance_km * scale * cosf(rad));
+            // Same Web Mercator projection (and current tile zoom) the map
+            // background is rendered with, so aircraft always line up with
+            // the map underneath them instead of drifting from it at long
+            // range or high latitude under a separate flat-earth estimate.
+            int px, py;
+            radar_geo_to_screen_px(live_fleet[i].lat, live_fleet[i].lon, &px, &py);
             ui_slots[i].calc_px = px;
             ui_slots[i].calc_py = py;
 
@@ -380,11 +411,10 @@ void radar_ui_refresh(void) {
                 int pts_to_draw = th->pt_count > cap ? cap : th->pt_count;
                 int start_idx = th->pt_count - pts_to_draw; // most recent pts_to_draw points
                 for(int p = 0; p < pts_to_draw; p++) {
-                    float p_dist, p_bear;
-                    calculate_coords(th->lats[start_idx + p], th->lons[start_idx + p], &p_dist, &p_bear);
-                    float p_rad = p_bear * DEG_TO_RAD;
-                    ui_slots[i].vec_pts_calc[p].x = RADAR_CENTER_X + (int)(p_dist * scale * sinf(p_rad));
-                    ui_slots[i].vec_pts_calc[p].y = RADAR_CENTER_Y - (int)(p_dist * scale * cosf(p_rad));
+                    int tp_x, tp_y;
+                    radar_geo_to_screen_px(th->lats[start_idx + p], th->lons[start_idx + p], &tp_x, &tp_y);
+                    ui_slots[i].vec_pts_calc[p].x = tp_x;
+                    ui_slots[i].vec_pts_calc[p].y = tp_y;
                 }
                 ui_slots[i].vec_pts_calc[pts_to_draw].x = px;
                 ui_slots[i].vec_pts_calc[pts_to_draw].y = py;
@@ -481,9 +511,8 @@ void radar_ui_refresh(void) {
             calculate_coords(ap->lat, ap->lon, &dist_km, &bearing_deg);
             if (dist_km > current_range_km) continue;
 
-            float rad = bearing_deg * DEG_TO_RAD;
-            int px = RADAR_CENTER_X + (int)(dist_km * scale * sinf(rad));
-            int py = RADAR_CENTER_Y - (int)(dist_km * scale * cosf(rad));
+            int px, py;
+            radar_geo_to_screen_px(ap->lat, ap->lon, &px, &py);
             if (px < 10 || px > (MAP_SIZE - 10) || py < 10 || py > (MAP_SIZE - 10)) continue;
 
             AirportSlotUI *slot = &ui_airports[airport_slot++];

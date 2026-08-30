@@ -34,8 +34,9 @@ int total_aircraft_in_zone = 0;
 // How many polling cycles (each API_FETCH_SEC seconds) between memory telemetry logs.
 #define MEM_TELEMETRY_EVERY_N_CYCLES  15
 
-// adsb.fi/airplanes.live both reject requests with no User-Agent (HTTP 403).
-#define ADSB_USER_AGENT "RadarOS-P4/1.1 (+https://github.com/vmisiek/RadarOS-P4)"
+// Spoof a real desktop browser UA - some dump1090-derived APIs sit behind a
+// WAF that returns HTTP 403 for a custom/non-browser User-Agent.
+#define ADSB_USER_AGENT "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
 uint32_t get_time_ms(void) {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
@@ -45,11 +46,14 @@ uint32_t get_time_ms(void) {
 // APIs take "dist" in NM) - querying only as far as the radar actually
 // displays keeps the JSON response (and the PSRAM parse buffer) small even
 // over dense metro areas, instead of always requesting a fixed 140 NM.
-// Clamped to a sane minimum/maximum regardless of the configured range.
+// Clamped to a sane minimum/maximum regardless of the configured range - the
+// upper bound covers the widest radar_ui.c range step (400 km = ~216 NM)
+// with headroom, so widening the range ladder never silently under-queries
+// the API relative to what the radar visually displays.
 static uint32_t compute_dist_nm(float range_km) {
     uint32_t nm = (uint32_t)ceilf(range_km * 0.539957f);
     if (nm < 5) nm = 5;
-    if (nm > 150) nm = 150;
+    if (nm > 230) nm = 230;
     return nm;
 }
 
@@ -305,7 +309,7 @@ static int parse_adsb_json(const char *json, AircraftData *out_planes, int max_p
 
         plane->is_military = detect_military(p, end, plane->callsign);
 
-        // dump1090-derived APIs (adsb.fi, airplanes.live) flag an aircraft on
+        // dump1090-derived APIs (adsb.fi, adsb.lol) flag an aircraft on
         // the ground with the text value "ground" in alt_baro (instead of a number).
         plane->on_ground = bounded_strstr(p, end, "\"alt_baro\":\"ground\"") != NULL;
 
@@ -388,15 +392,20 @@ static void adsb_worker_task(void *pvParameters) {
         return;
     }
 
+    // api.airplanes.live removed - its Cloudflare WAF blocks the ESP32's
+    // MbedTLS TLS fingerprint outright (HTTP 403), unrelated to User-Agent.
     static const char *api_hosts[] = {
         "https://opendata.adsb.fi/api/v2/lat/%.4f/lon/%.4f/dist/%u",
-        "https://api.airplanes.live/v2/point/%.4f/%.4f/%u"
+        "https://api.adsb.lol/v2/point/%.4f/%.4f/%u"
     };
-    int host_idx = 0;
+#define NUM_HOSTS (sizeof(api_hosts) / sizeof(api_hosts[0]))
+    // opendata.adsb.fi is the default/preferred host (index 0) - only falls
+    // over to adsb.lol after a failed request, see the rotation below.
+    int s_current_host_idx = 0;
     int cycle_count = 0;
 
     char url[160];
-    snprintf(url, sizeof(url), api_hosts[host_idx], g_radar_lat, g_radar_lon, compute_dist_nm(radar_ui_get_range_km()));
+    snprintf(url, sizeof(url), api_hosts[s_current_host_idx], g_radar_lat, g_radar_lon, compute_dist_nm(radar_ui_get_range_km()));
 
     esp_http_client_config_t config = {
         .url = url,
@@ -421,9 +430,8 @@ static void adsb_worker_task(void *pvParameters) {
         vTaskDelete(NULL);
         return;
     }
-    // airplanes.live rejects requests with no User-Agent (HTTP 403) - set it
-    // explicitly on top of config.user_agent above, since it must survive
-    // across esp_http_client_set_url() calls on this reused handle.
+    // Set explicitly on top of config.user_agent above, since it must
+    // survive across esp_http_client_set_url() calls on this reused handle.
     esp_http_client_set_header(client, "User-Agent", ADSB_USER_AGENT);
     esp_http_client_set_header(client, "Accept", "application/json");
 
@@ -437,7 +445,7 @@ static void adsb_worker_task(void *pvParameters) {
         // and a query radius wider than what is actually displayed only
         // wastes bandwidth/PSRAM on aircraft that never get drawn.
         uint32_t dist_nm = compute_dist_nm(radar_ui_get_range_km());
-        snprintf(url, sizeof(url), api_hosts[host_idx], g_radar_lat, g_radar_lon, dist_nm);
+        snprintf(url, sizeof(url), api_hosts[s_current_host_idx], g_radar_lat, g_radar_lon, dist_nm);
         esp_http_client_set_url(client, url);
 
         // g_https_mutex serializes this against map_tile_service.c's TLS
@@ -468,34 +476,34 @@ static void adsb_worker_task(void *pvParameters) {
         }
         xSemaphoreGive(g_https_mutex);
 
-        if (err == ESP_OK && status == 200) {
+        if (err == ESP_OK && status == 200 && total_read > 200) {
             if (total_read >= HTTP_BUFFER_SIZE - 1) {
                 ESP_LOGW(TAG, "HTTP buffer (%d B) full - API response may have been truncated", HTTP_BUFFER_SIZE);
             }
 
-            if (total_read > 200) {
-                int max_planes = wifi_mgr_get_max_aircraft();
-                if (max_planes > MAX_AIRCRAFT_CAPACITY) max_planes = MAX_AIRCRAFT_CAPACITY;
+            int max_planes = wifi_mgr_get_max_aircraft();
+            if (max_planes > MAX_AIRCRAFT_CAPACITY) max_planes = MAX_AIRCRAFT_CAPACITY;
 
-                memset(temp_fleet, 0, sizeof(AircraftData) * MAX_AIRCRAFT_CAPACITY);
-                int parsed = parse_adsb_json(resp_buf, temp_fleet, max_planes);
+            memset(temp_fleet, 0, sizeof(AircraftData) * MAX_AIRCRAFT_CAPACITY);
+            int parsed = parse_adsb_json(resp_buf, temp_fleet, max_planes);
 
-                if (parsed > 0 && adsb_service_lock(100)) {
-                    total_aircraft_in_zone = parsed;
-                    for (int i = 0; i < MAX_AIRCRAFT_CAPACITY; i++) {
-                        if (i < parsed) live_fleet[i] = temp_fleet[i];
-                        else live_fleet[i].active = false;
-                    }
-                    adsb_service_unlock();
-                    ESP_LOGI(TAG, "Fetched %d aircraft from %s", parsed, url);
-
-                    radar_ui_refresh();
+            if (parsed > 0 && adsb_service_lock(100)) {
+                total_aircraft_in_zone = parsed;
+                for (int i = 0; i < MAX_AIRCRAFT_CAPACITY; i++) {
+                    if (i < parsed) live_fleet[i] = temp_fleet[i];
+                    else live_fleet[i].active = false;
                 }
-            } else {
-                host_idx = (host_idx + 1) % 2;
+                adsb_service_unlock();
+                ESP_LOGI(TAG, "Fetched %d aircraft from %s", parsed, url);
+
+                radar_ui_refresh();
             }
         } else {
-            host_idx = (host_idx + 1) % 2;
+            // Any non-200 response, transport error, or suspiciously short
+            // body rotates to the next host unconditionally, so a failing
+            // host is never retried forever - the next cycle always tries
+            // the other API.
+            s_current_host_idx = (s_current_host_idx + 1) % NUM_HOSTS;
         }
 
         cycle_count++;

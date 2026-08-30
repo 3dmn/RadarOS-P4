@@ -52,7 +52,13 @@ static bool http_get_to_buffer_ua(const char *url, uint8_t *buf, int buf_size, i
     if (!client) return false;
     esp_http_client_set_header(client, "User-Agent", user_agent);
 
+    // g_https_mutex serializes this against adsb_service.c/map_tile_service.c/
+    // ota_update_service.c's TLS fetches - see the comment on g_https_mutex
+    // in wifi_manager.h. Never more than one HTTPS/TLS session open anywhere
+    // in the app at once, so the Wi-Fi SDIO driver's internal DMA-capable
+    // buffers are never starved by concurrent connections.
     bool ok = false;
+    xSemaphoreTake(g_https_mutex, portMAX_DELAY);
     esp_err_t err = esp_http_client_open(client, 0);
     if (err == ESP_OK) {
         esp_http_client_fetch_headers(client);
@@ -70,6 +76,7 @@ static bool http_get_to_buffer_ua(const char *url, uint8_t *buf, int buf_size, i
     } else {
         ESP_LOGW(TAG, "HTTP open failed: %s (%s)", esp_err_to_name(err), url);
     }
+    xSemaphoreGive(g_https_mutex);
     esp_http_client_cleanup(client);
     return ok;
 }

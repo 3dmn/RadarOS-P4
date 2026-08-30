@@ -6,6 +6,13 @@
 #include "aircraft_types.h"
 #include "mqtt_service.h"
 
+// Projects any lat/lon to a radar-relative screen pixel (RADAR_CENTER_X/Y
+// origin) using the same Web Mercator world-pixel math and current zoom
+// level map_tile_service.c renders the OSM tile background with - see the
+// doc comment in radar_ui.c. Safe to call from any task; reads only
+// g_radar_lat/g_radar_lon and map_tile_service_get_current_zoom().
+void radar_geo_to_screen_px(double lat, double lon, int *out_x, int *out_y);
+
 // Allocates the PSRAM buffers needed by UI views (aircraft slots). Call
 // before radar_ui_build(). Returns false if allocation failed.
 bool radar_ui_init(void);
