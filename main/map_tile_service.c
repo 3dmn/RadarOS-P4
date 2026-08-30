@@ -252,6 +252,10 @@ bool map_tile_service_init(void) {
         return false;
     }
 
+    // 12 KB stack - with CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y (see
+    // sdkconfig.defaults), FreeRTOS places this in external PSRAM instead of
+    // the internal DMA-capable SRAM the Wi-Fi SDIO driver needs, so this
+    // task's stack never competes with it.
     xTaskCreatePinnedToCore(map_worker_task, "map_worker", 12288, NULL, 2, NULL, 1);
     return true;
 }

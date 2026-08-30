@@ -523,5 +523,9 @@ bool adsb_service_init(void) {
 }
 
 void adsb_service_start(void) {
+    // 16 KB stack - with CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y (see
+    // sdkconfig.defaults), FreeRTOS places this in external PSRAM instead of
+    // the internal DMA-capable SRAM the Wi-Fi SDIO driver needs, so this
+    // task's stack never competes with it.
     xTaskCreatePinnedToCore(adsb_worker_task, "adsb_worker", 16384, NULL, 3, NULL, 1);
 }

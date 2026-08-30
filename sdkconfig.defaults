@@ -37,6 +37,15 @@ CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
 
+# Push Wi-Fi/lwIP network buffers and FreeRTOS task stacks into PSRAM too -
+# internal SRAM is what the Wi-Fi SDIO driver needs for its own DMA
+# buffers ("sdio_rx_get_buffer"), so nothing else should compete for it.
+# CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL stays at 0 (see above) - that already
+# routes every malloc() to PSRAM regardless of size, which is stricter
+# (more PSRAM-favoring) than a raised 256 B threshold would be.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
 # Konfiguracja wyswietlacza LVGL
 CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
