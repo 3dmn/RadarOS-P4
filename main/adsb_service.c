@@ -365,6 +365,18 @@ void adsb_service_unlock(void) {
     xSemaphoreGive(g_data_mutex);
 }
 
+static volatile bool s_adsb_paused = false;
+
+void adsb_service_pause(void) {
+    s_adsb_paused = true;
+    ESP_LOGI(TAG, "ADS-B polling paused (OTA update in progress)");
+}
+
+void adsb_service_resume(void) {
+    s_adsb_paused = false;
+    ESP_LOGI(TAG, "ADS-B polling resumed");
+}
+
 static void adsb_worker_task(void *pvParameters) {
     wifi_manager_wait_connected();
     ESP_LOGI(TAG, "Starting cyclic ADS-B polling task...");
@@ -416,6 +428,11 @@ static void adsb_worker_task(void *pvParameters) {
     esp_http_client_set_header(client, "Accept", "application/json");
 
     while (1) {
+        if (s_adsb_paused) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
         // Recomputed every cycle - the user can change the HUD range live,
         // and a query radius wider than what is actually displayed only
         // wastes bandwidth/PSRAM on aircraft that never get drawn.

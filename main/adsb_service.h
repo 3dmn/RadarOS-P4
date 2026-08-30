@@ -23,6 +23,15 @@ void adsb_service_start(void);
 bool adsb_service_lock(uint32_t timeout_ms);
 void adsb_service_unlock(void);
 
+// Suspends/resumes the polling loop's API requests (the loop keeps running,
+// it just skips fetching and sleeps) - used by ota_update_service.c to keep
+// the ADS-B task off the network entirely while esp_https_ota() is
+// streaming/flashing firmware, so the two never hold concurrent TLS
+// sessions and starve the Wi-Fi SDIO driver's internal DMA buffers. Safe to
+// call from any task.
+void adsb_service_pause(void);
+void adsb_service_resume(void);
+
 uint32_t get_time_ms(void);
 void calculate_coords(float lat, float lon, float *out_dist_km, float *out_bearing_deg);
 AircraftTrackHistory* find_aircraft_track(const char *hex);

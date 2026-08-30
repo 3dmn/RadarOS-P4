@@ -459,7 +459,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     char ip_str[16] = "0.0.0.0";
     get_wifi_status_info(&sta_connected, ip_str, sizeof(ip_str));
     const esp_app_desc_t *app_desc = esp_app_get_description();
-    // Full version string ("RadarOS P4 v1.1.0 . commit 948d2d3 (IDF v5.3.5)")
+    // Full version string ("RadarOS P4 v1.0.0 . commit 948d2d3 (IDF v5.3.5)")
     // for the System tab, and a shorter one for the fixed footer - the
     // commit hash comes from esp_app_desc_t.version (auto git describe from
     // the ESP-IDF build system), strip_v_prefix prevents a double "vv" if
@@ -781,9 +781,10 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
             snprintf(latest_line, sizeof(latest_line), "v%s (%s)", latest,
                       upd_avail ? T(STR_WEB_FWUPD_AVAILABLE) : T(STR_WEB_FWUPD_UP_TO_DATE));
         }
-        char install_btn_label[80];
-        snprintf(install_btn_label, sizeof(install_btn_label), "%s%s%s",
-                 T(STR_WEB_FWUPD_INSTALL_BTN_PREFIX), latest[0] ? latest : "?", T(STR_WEB_FWUPD_INSTALL_BTN_SUFFIX));
+        char download_btn_label[80];
+        snprintf(download_btn_label, sizeof(download_btn_label), "%s%s%s",
+                 T(STR_WEB_FWUPD_DOWNLOAD_BTN_PREFIX), latest[0] ? latest : "?", T(STR_WEB_FWUPD_DOWNLOAD_BTN_SUFFIX));
+        const char *release_url = ota_update_get_release_url();
         hb_append(&hb,
             "<div style='margin-top:18px;border-top:1px solid #30363d;padding-top:14px;'>"
             "<label style='color:#00ff88;font-weight:bold;'>\xF0\x9F\x94\x84 %s</label>"
@@ -797,12 +798,9 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
             "<span class=\"slider\"></span></label></div>"
             "<button type='button' class='geobtn' style='margin-top:10px;' id='btn_check_update' onclick='checkOtaUpdate(event)'>%s</button>"
             "<p id='check-update-status' class='hint'></p>"
-            "<button type='button' class='geobtn' id='btn_install_update' style='background:#16a34a;color:#fff;display:%s' onclick='installOtaUpdate(event)'>%s</button>"
-            "<div id='ota-install-modal' style='display:none;margin-top:10px;padding:10px;background:#0d1117;border:1px solid #16a34a;border-radius:6px;'>"
-            "<p style='margin:0 0 8px 0;color:#f59e0b;font-weight:bold;'>%s</p>"
-            "<div class='progress-wrap'><div id='ota-install-progress' class='progress-bar' style='background:#16a34a;'></div></div>"
-            "<p id='ota-install-status' class='hint'></p>"
-            "</div>"
+            "<a id='btn_download_update' href='%s' target='_blank' rel='noopener' class='geobtn' "
+            "style='display:%s;background:#2563eb;color:#fff;text-align:center;text-decoration:none;font-weight:bold;box-sizing:border-box;'>%s</a>"
+            "<p id='download-update-hint' class='hint' style='display:%s;'>%s</p>"
             "</div>",
             T(STR_WEB_FWUPD_SECTION),
             T(STR_WEB_FWUPD_CURRENT), ota_update_get_installed_version(),
@@ -811,8 +809,8 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
             T(STR_WEB_FWUPD_REPO_HINT),
             T(STR_WEB_FWUPD_AUTO), g_auto_update_enabled == 1 ? "checked" : "",
             T(STR_WEB_FWUPD_CHECK_BTN),
-            upd_avail ? "block" : "none", install_btn_label,
-            T(STR_WEB_FWUPD_INSTALLING_WARN));
+            release_url, upd_avail ? "block" : "none", download_btn_label,
+            upd_avail ? "block" : "none", T(STR_WEB_FWUPD_DOWNLOAD_HINT));
     }
 
     hb_append(&hb, "</div>"); // #tab-system
@@ -876,7 +874,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "otaUploading:'%s',otaOk:'%s',otaError:'%s',otaSelectFile:'%s',"
         "mqttConnected:'%s',mqttConnecting:'%s',mqttError:'%s',mqttDisabled:'%s',"
         "fwChecking:'%s',fwCheckError:'%s',fwAvailable:'%s',fwUpToDate:'%s',fwUnknown:'%s',"
-        "fwInstallPrefix:'%s',fwInstallSuffix:'%s',fwInstallOk:'%s',fwInstallError:'%s'};"
+        "fwDownloadPrefix:'%s',fwDownloadSuffix:'%s'};"
         "var __map=null,__marker=null;"
         "function showTab(name){"
         "['display','location','wifi','system','mqtt'].forEach(function(k){"
@@ -1011,51 +1009,20 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "if(lbl){"
         "lbl.textContent=d.latest_version?('v'+d.latest_version+' ('+(d.update_available?I18N.fwAvailable:I18N.fwUpToDate)+')'):I18N.fwUnknown;"
         "}"
-        "var instBtn=document.getElementById('btn_install_update');"
-        "if(instBtn){"
-        "if(d.update_available){"
-        "instBtn.style.display='block';"
-        "instBtn.textContent=I18N.fwInstallPrefix+d.latest_version+I18N.fwInstallSuffix;"
+        "var dlBtn=document.getElementById('btn_download_update');"
+        "var dlHint=document.getElementById('download-update-hint');"
+        "if(dlBtn){"
+        "if(d.update_available&&d.release_url){"
+        "dlBtn.href=d.release_url;"
+        "dlBtn.style.display='block';"
+        "dlBtn.textContent=I18N.fwDownloadPrefix+d.latest_version+I18N.fwDownloadSuffix;"
+        "if(dlHint)dlHint.style.display='block';"
         "}else{"
-        "instBtn.style.display='none';"
+        "dlBtn.style.display='none';"
+        "if(dlHint)dlHint.style.display='none';"
         "}"
         "}"
         "}).catch(function(){if(btn)btn.disabled=false;st.textContent=I18N.fwCheckError;});"
-        "return false;"
-        "}"
-        "function installOtaUpdate(e){"
-        "if(e){e.preventDefault();e.stopPropagation();}"
-        "var modal=document.getElementById('ota-install-modal');"
-        "var bar=document.getElementById('ota-install-progress');"
-        "var st=document.getElementById('ota-install-status');"
-        "var btn=document.getElementById('btn_install_update');"
-        "var chkBtn=document.getElementById('btn_check_update');"
-        "if(btn)btn.disabled=true;"
-        "if(chkBtn)chkBtn.disabled=true;"
-        "if(modal)modal.style.display='block';"
-        "if(bar)bar.style.width='15%%';"
-        "if(st)st.textContent='';"
-        "setTimeout(function(){if(bar)bar.style.width='70%%';},600);"
-        "fetch('/api/ota_start_download',{method:'POST'}).then(function(r){return r.json();}).then(function(d){"
-        "if(bar)bar.style.width='100%%';"
-        "if(d.success){"
-        "var secs=2;"
-        "if(st)st.textContent=I18N.fwInstallOk+' ('+secs+'s)';"
-        "var iv=setInterval(function(){"
-        "secs--;"
-        "if(st)st.textContent=I18N.fwInstallOk+' ('+secs+'s)';"
-        "if(secs<=0)clearInterval(iv);"
-        "},1000);"
-        "}else{"
-        "if(st)st.textContent=I18N.fwInstallError;"
-        "if(btn)btn.disabled=false;"
-        "if(chkBtn)chkBtn.disabled=false;"
-        "}"
-        "}).catch(function(){"
-        "if(st)st.textContent=I18N.fwInstallError;"
-        "if(btn)btn.disabled=false;"
-        "if(chkBtn)chkBtn.disabled=false;"
-        "});"
         "return false;"
         "}"
         "function pollMqttStatus(){"
@@ -1094,8 +1061,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         T(STR_WEB_MQTT_STATUS_ERROR), T(STR_WEB_MQTT_STATUS_DISABLED),
         T(STR_WEB_FWUPD_CHECKING), T(STR_WEB_FWUPD_CHECK_ERROR),
         T(STR_WEB_FWUPD_AVAILABLE), T(STR_WEB_FWUPD_UP_TO_DATE), T(STR_WEB_FWUPD_UNKNOWN),
-        T(STR_WEB_FWUPD_INSTALL_BTN_PREFIX), T(STR_WEB_FWUPD_INSTALL_BTN_SUFFIX),
-        T(STR_WEB_FWUPD_INSTALL_OK), T(STR_WEB_FWUPD_INSTALL_ERROR));
+        T(STR_WEB_FWUPD_DOWNLOAD_BTN_PREFIX), T(STR_WEB_FWUPD_DOWNLOAD_BTN_SUFFIX));
 
     if (hb.pos >= hb.cap - 1) {
         ESP_LOGE(TAG, "Web page exceeded buffer (%d B) - response truncated!", HTML_PAGE_BUF_SIZE);
@@ -1717,40 +1683,13 @@ static esp_err_t check_update_post_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(root, "installed_version", ota_update_get_installed_version());
     cJSON_AddStringToObject(root, "latest_version", ota_update_get_latest_version());
     cJSON_AddBoolToObject(root, "update_available", ota_update_is_available());
+    cJSON_AddStringToObject(root, "release_url", ota_update_get_release_url());
     char *payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, payload ? payload : "{}");
     free(payload);
-    return ESP_OK;
-}
-
-// Downloads and flashes the firmware version found by the last check,
-// blocking the calling httpd worker task for the whole operation - the
-// same pattern already used by /update (browser firmware upload) below.
-// Responds with {"success":true/false} once the download+flash attempt
-// finishes, then schedules a restart 2s later (same as /update) so the
-// JSON response has time to reach the browser before the connection drops.
-static esp_err_t ota_start_download_post_handler(httpd_req_t *req) {
-    ESP_LOGI(TAG, "Firmware install requested via web panel");
-    bool ok = ota_update_install_now_sync();
-
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "success", ok);
-    char *payload = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, payload ? payload : "{\"success\":false}");
-    free(payload);
-
-    if (ok) {
-        ESP_LOGI(TAG, "Firmware update installed via web panel, restarting in 2s...");
-        xTaskCreate(restart_task, "web_ota_restart", 2048, (void *)(uintptr_t)2000, 5, NULL);
-    } else {
-        ESP_LOGE(TAG, "Firmware install via web panel failed, staying on the current firmware");
-    }
     return ESP_OK;
 }
 
@@ -1770,7 +1709,6 @@ static void start_web_server(void) {
     httpd_uri_t update_uri = {.uri = "/update", .method = HTTP_POST, .handler = update_post_handler};
     httpd_uri_t mqtt_status_uri = {.uri = "/mqtt_status", .method = HTTP_GET, .handler = mqtt_status_get_handler};
     httpd_uri_t check_update_uri = {.uri = "/check_update", .method = HTTP_POST, .handler = check_update_post_handler};
-    httpd_uri_t ota_start_uri = {.uri = "/api/ota_start_download", .method = HTTP_POST, .handler = ota_start_download_post_handler};
 
     if (httpd_start(&g_web_server, &config) == ESP_OK) {
         httpd_register_uri_handler(g_web_server, &root_uri);
@@ -1782,7 +1720,6 @@ static void start_web_server(void) {
         httpd_register_uri_handler(g_web_server, &update_uri);
         httpd_register_uri_handler(g_web_server, &mqtt_status_uri);
         httpd_register_uri_handler(g_web_server, &check_update_uri);
-        httpd_register_uri_handler(g_web_server, &ota_start_uri);
         ESP_LOGI(TAG, "Radar configuration web panel started on port 80!");
     }
 }

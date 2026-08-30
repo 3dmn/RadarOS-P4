@@ -7,9 +7,7 @@
 #include "freertos/semphr.h"
 
 #include "esp_log.h"
-#include "esp_system.h"
 #include "esp_http_client.h"
-#include "esp_https_ota.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "cJSON.h"
@@ -106,7 +104,9 @@ static bool http_get_to_buffer(const char *url, uint8_t *buf, int buf_size, int 
 
 // Fetches the version.json manifest at ota_update_get_manifest_url()
 // ({"version":...,"url":...,"notes":...}) and updates s_latest_version/
-// s_asset_url/s_release_notes/s_update_available.
+// s_asset_url/s_release_notes/s_update_available. s_asset_url is only used
+// to report a GitHub release download link (web panel, MQTT/Home Assistant)
+// - it is never fetched directly by this device.
 static void perform_version_check(void) {
     const char *manifest_url = ota_update_get_manifest_url();
 
@@ -157,64 +157,10 @@ static void perform_version_check(void) {
     ESP_LOGI(TAG, "Version check: installed=%s latest=%s update_available=%s",
              s_installed_version, s_latest_version, newer ? "yes" : "no");
     if (newer && !s_asset_url[0]) {
-        ESP_LOGW(TAG, "Newer version found but the manifest has no 'url' field - auto-update unavailable");
+        ESP_LOGW(TAG, "Newer version found but the manifest has no 'url' field - no download link to report");
     }
 
     radar_ui_update_fw_status(newer, s_latest_version, s_release_notes);
-}
-
-// ================= DOWNLOAD & FLASH =================
-static void restart_task(void *arg) {
-    uint32_t delay_ms = (uint32_t)(uintptr_t)arg;
-    vTaskDelay(pdMS_TO_TICKS(delay_ms));
-    esp_restart();
-}
-
-// Downloads and flashes the .bin at 'url' into the inactive OTA partition
-// using the high-level esp_https_ota() one-shot API (partition selection,
-// header/magic-byte validation and image verification are all handled
-// internally). Returns true only on full success.
-static bool download_and_flash_firmware(const char *url) {
-    esp_http_client_config_t http_config = {
-        .url = url,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 15000,
-        .buffer_size = 4096,
-        .max_redirection_count = 5,
-        .keep_alive_enable = false,
-    };
-    esp_https_ota_config_t ota_config = {
-        .http_config = &http_config,
-    };
-
-    // Held for the whole download (not just the handshake) - this is the
-    // single largest, longest-running HTTPS transfer in the app, so it must
-    // not run alongside any other TLS session. See g_https_mutex in
-    // wifi_manager.h.
-    ESP_LOGI(TAG, "Starting firmware download via esp_https_ota from %s", url);
-    xSemaphoreTake(g_https_mutex, portMAX_DELAY);
-    esp_err_t err = esp_https_ota(&ota_config);
-    xSemaphoreGive(g_https_mutex);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_https_ota failed: %s", esp_err_to_name(err));
-        return false;
-    }
-
-    ESP_LOGI(TAG, "Firmware written successfully via esp_https_ota");
-    return true;
-}
-
-static void maybe_auto_install_if_enabled(void) {
-    if (!s_update_available || !s_asset_url[0] || !wifi_mgr_get_auto_update_enabled()) {
-        return;
-    }
-    ESP_LOGI(TAG, "Auto-Update is enabled and a newer version is available - installing now");
-    if (download_and_flash_firmware(s_asset_url)) {
-        ESP_LOGI(TAG, "Auto-update successful, restarting in 2s...");
-        xTaskCreate(restart_task, "ota_upd_restart", 2048, (void *)(uintptr_t)2000, 5, NULL);
-    } else {
-        ESP_LOGE(TAG, "Auto-update failed, staying on the current firmware");
-    }
 }
 
 // ================= SERVICE LIFECYCLE =================
@@ -225,26 +171,8 @@ static void ota_check_task(void *arg) {
 
     while (1) {
         perform_version_check();
-        maybe_auto_install_if_enabled();
         vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_INTERVAL_MS));
     }
-}
-
-static void install_now_task(void *arg) {
-    (void)arg;
-    if (!s_asset_url[0]) {
-        ESP_LOGW(TAG, "Install requested but no firmware asset URL is known yet");
-        vTaskDelete(NULL);
-        return;
-    }
-    ESP_LOGI(TAG, "Manual install requested, downloading firmware from %s", s_asset_url);
-    if (download_and_flash_firmware(s_asset_url)) {
-        ESP_LOGI(TAG, "Manual update successful, restarting in 2s...");
-        xTaskCreate(restart_task, "ota_upd_restart", 2048, (void *)(uintptr_t)2000, 5, NULL);
-    } else {
-        ESP_LOGE(TAG, "Manual update failed, staying on the current firmware");
-    }
-    vTaskDelete(NULL);
 }
 
 void ota_update_service_start(void) {
@@ -257,25 +185,17 @@ void ota_update_service_start(void) {
 }
 
 void ota_update_check_now(void) {
-    // Auto-Update is intentionally not triggered here - this call runs on
-    // the caller's own task (typically an httpd worker), and a firmware
-    // download + reboot there would abandon the in-flight HTTP response.
-    // The periodic background task in ota_check_task() is the only path
-    // that installs automatically.
     perform_version_check();
 }
 
+// Direct in-device installation (esp_https_ota) has been removed entirely -
+// firmware is downloaded manually from the GitHub release link (web panel/
+// MQTT) and flashed through the existing "Firmware Update (OTA)" file
+// upload instead. This stub only exists so the Home Assistant "Install"
+// button on the MQTT update entity (still wired in mqtt_service.c) has a
+// defined target to call; it does not download or flash anything.
 void ota_update_install_now(void) {
-    xTaskCreatePinnedToCore(install_now_task, "ota_install_now", 8192, NULL, 4, NULL, 1);
-}
-
-bool ota_update_install_now_sync(void) {
-    if (!s_asset_url[0]) {
-        ESP_LOGW(TAG, "Install requested but no firmware asset URL is known yet");
-        return false;
-    }
-    ESP_LOGI(TAG, "Web panel install requested, downloading firmware from %s", s_asset_url);
-    return download_and_flash_firmware(s_asset_url);
+    ESP_LOGW(TAG, "Direct install requested but is disabled - download the release .bin and flash it via the web panel instead");
 }
 
 bool ota_update_is_available(void) {

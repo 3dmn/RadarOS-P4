@@ -33,7 +33,7 @@ static const char *TAG = "MAP_TILE_SVC";
 
 #define TILE_SIZE               256
 #define MAP_TILE_PNG_BUF_SIZE   (64 * 1024)
-#define MAP_TILE_USER_AGENT     "ESP32P4-ADSB-Radar/1.0 (ESP32-P4 Radar Client)"
+#define MAP_TILE_USER_AGENT     "RadarOS-P4/1.0 (+https://github.com/vmisiek/RadarOS-P4)"
 #define MAP_MIN_ZOOM             2
 #define MAP_MAX_ZOOM            18
 #define MAP_BRIGHTNESS_PCT      58
@@ -48,6 +48,7 @@ static QueueHandle_t s_req_queue;
 static lv_obj_t *s_canvas = NULL;
 static uint8_t *s_canvas_buf = NULL;
 static bool s_enabled = true;
+static volatile bool s_paused = false;
 
 static void latlon_to_tilef(double lat, double lon, int zoom, double *xtile, double *ytile) {
     double lat_rad = lat * M_PI / 180.0;
@@ -75,6 +76,9 @@ static int compute_zoom_for_range(float range_km, float lat) {
 // different host-relative path anyway), so only the actual open/read/close
 // section holds the mutex, not PNG decoding or blitting.
 static bool http_get_tile(const char *url, uint8_t *buf, int buf_size, int *out_len, int *out_status) {
+    // Never start a new tile request while paused (OTA update in progress).
+    if (s_paused) return false;
+
     esp_http_client_config_t config = {
         .url = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -82,29 +86,46 @@ static bool http_get_tile(const char *url, uint8_t *buf, int buf_size, int *out_
         .buffer_size = 4096,
         .max_redirection_count = 5,
         .keep_alive_enable = false,
+        .user_agent = MAP_TILE_USER_AGENT,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) return false;
+    // OSM tile servers reject requests with no identifiable User-Agent -
+    // set explicitly on top of config.user_agent above for certainty.
     esp_http_client_set_header(client, "User-Agent", MAP_TILE_USER_AGENT);
 
     bool ok = false;
     xSemaphoreTake(g_https_mutex, portMAX_DELAY);
+    // Re-checked after taking the mutex - a pause may have started while
+    // this request was queued behind another TLS session (e.g. the
+    // firmware download itself acquiring the mutex first).
+    if (s_paused) {
+        xSemaphoreGive(g_https_mutex);
+        esp_http_client_cleanup(client);
+        return false;
+    }
     esp_err_t err = esp_http_client_open(client, 0);
     if (err == ESP_OK) {
         esp_http_client_fetch_headers(client);
         *out_status = esp_http_client_get_status_code(client);
 
         int total = 0, r;
-        while ((r = esp_http_client_read(client, (char *)(buf + total), buf_size - total)) > 0) {
+        while (!s_paused && (r = esp_http_client_read(client, (char *)(buf + total), buf_size - total)) > 0) {
             total += r;
             if (total >= buf_size) break;
         }
+        if (s_paused) {
+            ESP_LOGW(TAG, "Tile download aborted mid-transfer: OTA update in progress");
+        }
         *out_len = total;
-        ok = (*out_status == 200 && total > 0);
-        esp_http_client_close(client);
+        ok = (!s_paused && *out_status == 200 && total > 0);
     } else {
         ESP_LOGW(TAG, "HTTP open failed: %s (%s)", esp_err_to_name(err), url);
     }
+    // Always closed/cleaned up, on both the success and failure paths -
+    // an unopened connection is a no-op to close, but skipping it on error
+    // was leaving sockets to linger and starve the TCP/TLS socket pool.
+    esp_http_client_close(client);
     xSemaphoreGive(g_https_mutex);
     esp_http_client_cleanup(client);
     return ok;
@@ -117,7 +138,12 @@ static bool http_get_tile(const char *url, uint8_t *buf, int buf_size, int *out_
 static void darken_and_blit_tile(const uint8_t *rgb, int tile_w, int tile_h, int dst_x0, int dst_y0) {
     uint16_t *dst = (uint16_t *)s_canvas_buf;
     for (int y = 0; y < tile_h; y++) {
-        int dy = dst_y0 + (tile_h - 1 - y);
+        // Row y of the decoded PNG (row 0 = the tile's north/top edge) maps
+        // straight to dst_y0 + y - both the source image and the canvas use
+        // top-to-bottom row order (Y grows south/down), so no vertical flip
+        // is needed here. Flipping it (as this used to do) mirrored every
+        // tile top-to-bottom, which is the "upside down tiles" bug.
+        int dy = dst_y0 + y;
         if (dy < 0 || dy >= MAP_SIZE) continue;
         const uint8_t *src_row = rgb + (size_t)y * tile_w * 3;
         uint16_t *dst_row = dst + (size_t)dy * MAP_SIZE;
@@ -150,29 +176,60 @@ static void process_reload(float lat, float lon, float range_km) {
     int ty_min = (int)floor(ytile_f - (double)RADAR_CENTER_Y / TILE_SIZE) - 1;
     int ty_max = (int)floor(ytile_f + (double)(MAP_SIZE - RADAR_CENTER_Y) / TILE_SIZE) + 1;
 
-    uint8_t *png_buf = heap_caps_malloc(MAP_TILE_PNG_BUF_SIZE, MALLOC_CAP_SPIRAM);
-    if (!png_buf) {
-        ESP_LOGE(TAG, "Failed to allocate tile PNG buffer in PSRAM!");
-        return;
-    }
-
     memset(s_canvas_buf, 0, (size_t)MAP_SIZE * MAP_SIZE * 2);
 
+    // Tiles are fetched strictly one at a time, in this single task, and
+    // http_get_tile() additionally serializes on g_https_mutex against
+    // adsb_service.c/ota_update_service.c - never more than one HTTP/TLS
+    // connection open anywhere in the app at once. This keeps the Wi-Fi
+    // SDIO driver's internal DMA-capable buffers from being starved by
+    // concurrent sockets ("sdio_rx_get_buffer" crashes).
     for (int ty = ty_min; ty <= ty_max; ty++) {
+        if (s_paused) {
+            ESP_LOGW(TAG, "Tile reload aborted: OTA update in progress");
+            break;
+        }
         if (ty < 0 || ty >= n) continue;
         for (int tx_raw = tx_min; tx_raw <= tx_max; tx_raw++) {
+            if (s_paused) break;
             int tx = ((tx_raw % n) + n) % n;
             char url[96];
             snprintf(url, sizeof(url), "https://tile.openstreetmap.org/%d/%d/%d.png", zoom, tx, ty);
 
+            // Allocated fresh per tile (PSRAM only) and freed as soon as
+            // this tile is done with it, rather than held for the whole
+            // reload - keeps peak PSRAM usage minimal and never touches
+            // internal DMA-capable RAM.
+            uint8_t *png_buf = heap_caps_malloc(MAP_TILE_PNG_BUF_SIZE, MALLOC_CAP_SPIRAM);
+            if (!png_buf) {
+                ESP_LOGE(TAG, "Failed to allocate tile PNG buffer in PSRAM!");
+                vTaskDelay(pdMS_TO_TICKS(200));
+                continue;
+            }
+
             int len = 0, status = 0;
-            if (!http_get_tile(url, png_buf, MAP_TILE_PNG_BUF_SIZE, &len, &status)) {
+            bool got_tile = http_get_tile(url, png_buf, MAP_TILE_PNG_BUF_SIZE, &len, &status);
+
+            // Fixed pacing after every tile attempt (success or failure) -
+            // gives LWIP time to release the just-closed socket out of
+            // TIME_WAIT and the SDIO driver time to reclaim its DMA buffers
+            // before the next esp_http_client_open(). Without this, dozens
+            // of tiles fired back-to-back exhaust the socket pool ("Failed
+            // to create socket").
+            vTaskDelay(pdMS_TO_TICKS(200));
+
+            if (!got_tile) {
                 ESP_LOGW(TAG, "Tile fetch failed: %s (status %d)", url, status);
+                heap_caps_free(png_buf);
                 continue;
             }
 
             int w = 0, h = 0, ch = 0;
             unsigned char *rgb = stbi_load_from_memory(png_buf, len, &w, &h, &ch, 3);
+            // png_buf is only needed for the decode above - free it
+            // immediately instead of holding it until the whole reload
+            // finishes.
+            heap_caps_free(png_buf);
             if (!rgb || w <= 0 || h <= 0) {
                 if (rgb) stbi_image_free(rgb);
                 ESP_LOGW(TAG, "PNG decode failed for tile %d/%d/%d", zoom, tx, ty);
@@ -185,8 +242,6 @@ static void process_reload(float lat, float lon, float range_km) {
             stbi_image_free(rgb);
         }
     }
-
-    heap_caps_free(png_buf);
 
     if (s_canvas) {
         bsp_display_lock(0);
@@ -201,7 +256,14 @@ static void map_worker_task(void *arg) {
 
     map_reload_req_t req;
     while (1) {
-        if (xQueueReceive(s_req_queue, &req, portMAX_DELAY) == pdTRUE) {
+        if (s_paused) {
+            // Do not drain the queue while paused - a pending reload
+            // request stays queued (xQueueOverwrite keeps only the latest
+            // one anyway) and is processed once resumed.
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+        if (xQueueReceive(s_req_queue, &req, pdMS_TO_TICKS(500)) == pdTRUE) {
             process_reload(req.lat, req.lon, req.range_km);
         }
     }
@@ -258,4 +320,14 @@ void map_tile_service_set_enabled(bool on) {
 
 bool map_tile_service_is_enabled(void) {
     return s_enabled;
+}
+
+void map_tile_service_pause(void) {
+    s_paused = true;
+    ESP_LOGI(TAG, "Tile fetching paused (OTA update in progress)");
+}
+
+void map_tile_service_resume(void) {
+    s_paused = false;
+    ESP_LOGI(TAG, "Tile fetching resumed");
 }
