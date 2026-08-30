@@ -12,12 +12,17 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
+#include "cJSON.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "bsp/esp32_p4_wifi6_touch_lcd_7b.h"
 
 #include "wifi_manager.h"
+#include "version.h"
 
 #define NVS_NAMESPACE           "radar_cfg"
 
@@ -32,6 +37,7 @@
 #define DEFAULT_RANGE_DEFAULT   250
 #define AIR_MODE_DEFAULT        0
 #define APTS_MODE_DEFAULT       1
+#define APT_FILTER_MASK_DEFAULT APT_TYPE_ALL
 #define HIDE_GROUND_DEFAULT     1
 #define MAP_ENABLED_DEFAULT     1
 #define SQUAWK_ALERT_DEFAULT    1
@@ -63,6 +69,7 @@ static uint8_t g_brightness = BRIGHTNESS_DEFAULT;
 static uint16_t g_default_range = DEFAULT_RANGE_DEFAULT;
 static uint8_t g_air_mode = AIR_MODE_DEFAULT;
 static uint8_t g_apts_mode = APTS_MODE_DEFAULT;
+static uint8_t g_apt_filter_mask = APT_FILTER_MASK_DEFAULT;
 static uint8_t g_hide_ground = HIDE_GROUND_DEFAULT;
 static uint8_t g_map_enabled = MAP_ENABLED_DEFAULT;
 static uint8_t g_squawk_alert_enabled = SQUAWK_ALERT_DEFAULT;
@@ -121,6 +128,10 @@ static void load_settings_from_nvs(void) {
     if (g_apts_mode > 1) {
         g_apts_mode = APTS_MODE_DEFAULT;
     }
+    nvs_get_u8(my_handle, "apt_fmask", &g_apt_filter_mask);
+    if ((g_apt_filter_mask & ~APT_TYPE_ALL) != 0) {
+        g_apt_filter_mask = APT_FILTER_MASK_DEFAULT;
+    }
     nvs_get_u8(my_handle, "hide_ground", &g_hide_ground);
     if (g_hide_ground > 1) {
         g_hide_ground = HIDE_GROUND_DEFAULT;
@@ -164,6 +175,7 @@ static void save_settings_to_nvs(void) {
     nvs_set_u16(my_handle, "default_rng", g_default_range);
     nvs_set_u8(my_handle, "air_mode", g_air_mode);
     nvs_set_u8(my_handle, "apts_mode", g_apts_mode);
+    nvs_set_u8(my_handle, "apt_fmask", g_apt_filter_mask);
     nvs_set_u8(my_handle, "hide_ground", g_hide_ground);
     nvs_set_u8(my_handle, "map_en", g_map_enabled);
     nvs_set_u8(my_handle, "sqk_alert", g_squawk_alert_enabled);
@@ -188,6 +200,10 @@ uint8_t wifi_mgr_get_default_air_mode(void) {
 
 uint8_t wifi_mgr_get_default_apts_mode(void) {
     return g_apts_mode;
+}
+
+uint8_t wifi_mgr_get_apt_filter_mask(void) {
+    return g_apt_filter_mask;
 }
 
 bool wifi_mgr_get_hide_ground(void) {
@@ -228,8 +244,10 @@ void wifi_mgr_set_max_aircraft(uint16_t max_val) {
 }
 
 // ================= PANEL WWW =================
+// arg: opoznienie w ms (przekazane jako wartosc wskaznika, nie adres).
 static void restart_task(void *arg) {
-    vTaskDelay(pdMS_TO_TICKS(1500));
+    uint32_t delay_ms = (uint32_t)(uintptr_t)arg;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
     esp_restart();
 }
 
@@ -281,10 +299,37 @@ static void hb_append(html_builder_t *hb, const char *fmt, ...) {
     if (hb->pos > hb->cap) hb->pos = hb->cap;
 }
 
-#define HTML_PAGE_BUF_SIZE (12 * 1024)
+#define HTML_PAGE_BUF_SIZE (64 * 1024)
+
+// Aktualny status polaczenia (STA polaczone / AP-setup) i adres IP interfejsu,
+// ktory faktycznie serwuje panel WWW - do zakladki "Wi-Fi & Network".
+static void get_wifi_status_info(bool *out_sta_connected, char *ip_buf, size_t ip_len) {
+    bool sta_connected = (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) != 0;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey(sta_connected ? "WIFI_STA_DEF" : "WIFI_AP_DEF");
+    esp_netif_ip_info_t ip_info = {0};
+    if (netif) {
+        esp_netif_get_ip_info(netif, &ip_info);
+    }
+    snprintf(ip_buf, ip_len, IPSTR, IP2STR(&ip_info.ip));
+    *out_sta_connected = sta_connected;
+}
+
+// Usuwa wiodace 'v'/'V' z ciagu (np. git describe czasem juz zwraca "v..."),
+// zeby doklejenie wlasnego prefiksu "v" w FW_VERSION/commit nie dawalo "vv".
+static const char *strip_v_prefix(const char *s) {
+    if (s && (s[0] == 'v' || s[0] == 'V') && s[1] != '\0') return s + 1;
+    return s ? s : "";
+}
 
 static esp_err_t root_get_handler(httpd_req_t *req) {
-    char *page = malloc(HTML_PAGE_BUF_SIZE);
+    // Bufor strony budowany jest w PSRAM (nie na stosie taska httpd ani na
+    // ciasnej wewnetrznej stercie) - przy 64 KB zwykly malloc() tez trafilby
+    // w SPIRAM (CONFIG_SPIRAM_USE_MALLOC), ale heap_caps_malloc wymusza to
+    // jawnie niezaleznie od progu auto-routingu alokatora.
+    char *page = heap_caps_malloc(HTML_PAGE_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!page) {
+        page = malloc(HTML_PAGE_BUF_SIZE);
+    }
     if (!page) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
@@ -292,6 +337,24 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 
     html_builder_t hb;
     hb_init(&hb, page, HTML_PAGE_BUF_SIZE);
+
+    bool sta_connected = false;
+    char ip_str[16] = "0.0.0.0";
+    get_wifi_status_info(&sta_connected, ip_str, sizeof(ip_str));
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    // Pelny string wersji ("RadarOS P4 v1.1.0 . commit 948d2d3 (IDF v5.3.5)")
+    // do zakladki System oraz krotszy do stalej stopki - commit hash pochodzi
+    // z esp_app_desc_t.version (auto. git describe z build systemu ESP-IDF),
+    // strip_v_prefix zapobiega podwojnemu "vv" gdyby ten string mial juz "v".
+    char fw_full[112];
+    snprintf(fw_full, sizeof(fw_full), "%s %s \xC2\xB7 commit %s (IDF %s)",
+             FW_NAME, FW_VERSION, strip_v_prefix(app_desc->version), app_desc->idf_ver);
+    char fw_footer[80];
+    snprintf(fw_footer, sizeof(fw_footer), "%s %s (IDF %s)", FW_NAME, FW_VERSION, app_desc->idf_ver);
+    // Urzadzenie bez polaczenia STA serwuje panel z SoftAP (tryb konfiguracji)
+    // - w tym stanie uzytkownik prawie zawsze przyszedl tu ustawic Wi-Fi,
+    // wiec domyslnie aktywna zakladka to "Wi-Fi & Network" zamiast "Radar".
+    bool ap_mode = !sta_connected;
 
     hb_append(&hb,
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -301,15 +364,25 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>"
         "<style>"
         "body{background:#0a0f1d;color:#e6f7ee;font-family:-apple-system,system-ui,sans-serif;"
-        "max-width:540px;margin:0 auto;padding:24px 16px;}"
+        "max-width:820px;width:94%%;margin:0 auto;padding:24px 16px;}"
         "h1{color:#00ff88;font-size:1.3em;text-align:center;margin-bottom:20px;}"
         ".card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:16px;}"
         ".card h2{margin:0;font-size:1em;color:#00ff88;}"
+        ".tabbar{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-bottom:20px;}"
+        ".tabbtn{padding:8px 14px;border-radius:8px;border:1px solid #30363d;white-space:nowrap;"
+        "background:#1e293b;color:#c9d6e3;font-size:0.9rem;font-weight:600;cursor:pointer;"
+        "transition:background .15s,color .15s;}"
+        ".tabbtn:hover{background:#26313f;}"
+        ".tabbtn.active{background:#10b981;border-color:#10b981;color:#04150c;}"
+        ".statrow{display:flex;justify-content:space-between;align-items:center;margin-top:10px;"
+        "padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;font-size:0.85em;}"
+        ".statrow span:first-child{color:#8fb;}"
         "label{display:block;margin-top:10px;margin-bottom:4px;font-size:0.85em;color:#8fb;}"
         "input,select{width:100%%;box-sizing:border-box;height:42px;padding:0 10px;border-radius:6px;"
         "border:1px solid #30363d;background:#0d1117;color:#fff;font-size:0.95em;}"
         "input[type=range]{height:auto;padding:0;margin-top:6px;}"
-        ".grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}"
+        ".grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}"
+        "@media (max-width:600px){.grid2{grid-template-columns:1fr;}}"
         ".scanrow{display:flex;gap:8px;align-items:center;}"
         ".scanrow>input{flex:1;}"
         ".scanrow>button{width:auto;white-space:nowrap;padding:0 14px;height:42px;margin:0;}"
@@ -322,61 +395,51 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         ".btn-scan:active{background:#145;}"
         ".btn-scan:disabled{opacity:0.6;cursor:default;}"
         "#wifi-select{cursor:pointer;}"
-        "#map{height:280px;border-radius:8px;margin-top:10px;display:none;border:1px solid #145;overflow:hidden;}"
+        "#map{width:100%%;aspect-ratio:1/1;border-radius:8px;margin-top:12px;display:none;"
+        "border:1px solid #145;overflow:hidden;}"
         "small{display:block;color:#8b949e;margin-top:6px;font-size:0.8em;}"
         ".tip{color:#7a889b;font-size:0.85em;cursor:help;margin-left:4px;}"
+        ".chkgrp{display:flex;flex-direction:column;gap:6px;margin-top:4px;}"
+        ".chk{display:flex!important;align-items:center;gap:8px;margin:0!important;"
+        "font-size:0.9em;color:#e6f7ee;cursor:pointer;}"
+        ".chk input{width:auto!important;height:auto!important;}"
         ".btn-save{width:100%%;padding:14px;background:#238636;color:#fff;font-weight:bold;"
         "border:none;border-radius:8px;font-size:1.05em;cursor:pointer;margin-top:6px;transition:background .15s;}"
         ".btn-save:hover{background:#00c853;}"
         ".btn-save:disabled{opacity:0.6;cursor:default;}"
         "p#status{text-align:center;margin-top:14px;font-size:0.95em;}"
+        ".fw-footer{font-size:0.8rem;color:#64748b;text-align:center;margin:14px 0 10px 0;"
+        "font-family:monospace;}"
+        ".filerow{display:flex;gap:8px;align-items:center;margin-top:6px;}"
+        ".filerow>input[type=file]{flex:1;height:auto;padding:8px;font-size:0.8em;}"
+        ".filerow>button{width:auto;white-space:nowrap;padding:0 14px;height:42px;margin:0;"
+        "background:#0d1b2a;color:#8fb;border:1px solid #145;border-radius:6px;"
+        "font-size:0.85em;cursor:pointer;}"
+        ".filerow>button:disabled{opacity:0.6;cursor:default;}"
+        ".progress-wrap{background:#0d1117;border:1px solid #30363d;border-radius:6px;"
+        "height:20px;overflow:hidden;margin-top:10px;}"
+        ".progress-bar{height:100%%;width:0%%;background:#10b981;transition:width .2s;}"
+        "p.hint{color:#8b949e;font-size:0.8em;margin-top:8px;}"
         "</style></head><body>"
         "<h1>%s</h1>"
         "<form id='cfgForm' onsubmit='return saveConfig(event)'>",
         T(STR_WEB_PAGE_TITLE), T(STR_WEB_PAGE_TITLE));
 
-    // KARTA 1: jezyk + identyfikacja stacji
-    hb_append(&hb, "<div class='card'><h2>\xF0\x9F\x8C\x90 %s</h2>", T(STR_WEB_CARD_LANG));
+    // Pasek zakladek (Awtrix-style top tabs) - przelaczanie widokow czystym
+    // JS (element.style.display), patrz showTab() w <script> ponizej.
     hb_append(&hb,
-        "<label>%s</label>"
-        "<select name='lang'>"
-        "<option value='0' %s>English (Default)</option>"
-        "<option value='1' %s>Polski</option>"
-        "</select>",
-        T(STR_WEB_LANGUAGE), g_lang == 0 ? "selected" : "", g_lang == 1 ? "selected" : "");
-    hb_append(&hb, "<label>%s</label><input type='text' name='name' value='%s' maxlength='31'>",
-              T(STR_WEB_STATION_NAME), g_station_name);
-    hb_append(&hb, "</div>");
+        "<div class='tabbar'>"
+        "<button type='button' class='tabbtn%s' data-tab='display' onclick=\"showTab('display')\">\xF0\x9F\x93\x9F %s</button>"
+        "<button type='button' class='tabbtn' data-tab='location' onclick=\"showTab('location')\">\xF0\x9F\x93\x8D %s</button>"
+        "<button type='button' class='tabbtn%s' data-tab='wifi' onclick=\"showTab('wifi')\">\xF0\x9F\x93\xB6 %s</button>"
+        "<button type='button' class='tabbtn' data-tab='system' onclick=\"showTab('system')\">\xE2\x9A\x99\xEF\xB8\x8F %s</button>"
+        "</div>",
+        ap_mode ? "" : " active", T(STR_WEB_TAB_DISPLAY), T(STR_WEB_TAB_LOCATION),
+        ap_mode ? " active" : "", T(STR_WEB_TAB_WIFI), T(STR_WEB_TAB_SYSTEM));
 
-    // KARTA 2: Wi-Fi
-    hb_append(&hb, "<div class='card'><h2>\xF0\x9F\x93\xB6 %s</h2>", T(STR_WEB_WIFI_SECTION));
-    hb_append(&hb,
-        "<label>%s</label>"
-        "<div class='scanrow'>"
-        "<input type='text' id='ssid-input' name='ssid' value='%s' maxlength='32' required>"
-        "<button type='button' class='btn-scan' id='btn-scan' onclick='scanWifi()'>\xF0\x9F\x94\x8D %s</button>"
-        "</div>"
-        "<select id='wifi-select' style='display:none;margin-top:8px;width:100%%;'></select>",
-        T(STR_WEB_SSID), g_wifi_ssid, T(STR_WEB_SCAN_NETWORKS));
-    hb_append(&hb, "<label>%s</label><input type='password' name='pass' value='' maxlength='64' placeholder='%s'>",
-              T(STR_WEB_PASSWORD), T(STR_WEB_PASS_PLACEHOLDER));
-    hb_append(&hb, "</div>");
-
-    // KARTA 3: lokalizacja radaru
-    hb_append(&hb, "<div class='card'><h2>\xF0\x9F\x93\x8D %s</h2>", T(STR_WEB_CARD_LOCATION));
-    hb_append(&hb,
-        "<div class='grid2'>"
-        "<div><label>%s</label><input type='text' id='lat' name='lat' value='%.6f'></div>"
-        "<div><label>%s</label><input type='text' id='lon' name='lon' value='%.6f'></div>"
-        "</div>"
-        "<button type='button' class='geobtn' onclick='toggleMap()'>\xF0\x9F\x97\xBA\xEF\xB8\x8F %s</button>"
-        "<div id='map'></div>",
-        T(STR_WEB_LATITUDE), (double)g_radar_lat, T(STR_WEB_LONGITUDE), (double)g_radar_lon,
-        T(STR_WEB_SELECT_ON_MAP));
-    hb_append(&hb, "</div>");
-
-    // KARTA 4: parametry wyswietlacza i radaru
-    hb_append(&hb, "<div class='card'><h2>\xF0\x9F\x8E\x9B\xEF\xB8\x8F %s</h2>", T(STR_WEB_CARD_DISPLAY));
+    // ZAKLADKA: Radar & Display (domyslna w trybie STA)
+    hb_append(&hb, "<div class='card tabpanel' id='tab-display' style='display:%s'><h2>\xF0\x9F\x8E\x9B\xEF\xB8\x8F %s</h2>",
+              ap_mode ? "none" : "block", T(STR_WEB_CARD_DISPLAY));
     hb_append(&hb,
         "<label>%s: <span id='bval'>%u</span>%%</label>"
         "<input type='range' name='brightness' id='brightness' min='10' max='100' step='5' "
@@ -462,7 +525,108 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         g_trail_len == 120 ? "selected" : "", T(STR_WEB_TRAIL_120));
 
     hb_append(&hb, "</div>"); // .grid2
-    hb_append(&hb, "</div>"); // karta 4
+
+    hb_append(&hb,
+        "<div style=\"margin-top:10px;\">"
+        "<label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label>"
+        "<div class=\"chkgrp\">"
+        "<label class=\"chk\"><input type=\"checkbox\" name=\"apt_civil\" value=\"1\" %s>%s</label>"
+        "<label class=\"chk\"><input type=\"checkbox\" name=\"apt_mil\" value=\"1\" %s>%s</label>"
+        "<label class=\"chk\"><input type=\"checkbox\" name=\"apt_ga\" value=\"1\" %s>%s</label>"
+        "</div></div>",
+        T(STR_WEB_APT_TYPES), T(STR_WEB_APT_TYPES_HINT),
+        (g_apt_filter_mask & APT_TYPE_CIVIL) ? "checked" : "", T(STR_WEB_APT_CIVIL),
+        (g_apt_filter_mask & APT_TYPE_MIL) ? "checked" : "", T(STR_WEB_APT_MIL),
+        (g_apt_filter_mask & APT_TYPE_GA) ? "checked" : "", T(STR_WEB_APT_GA));
+
+    hb_append(&hb, "</div>"); // #tab-display
+
+    // ZAKLADKA: Location
+    hb_append(&hb, "<div class='card tabpanel' id='tab-location' style='display:none'><h2>\xF0\x9F\x93\x8D %s</h2>", T(STR_WEB_CARD_LOCATION));
+    hb_append(&hb,
+        "<div class='grid2'>"
+        "<div><label>%s</label><input type='text' id='lat' name='lat' value='%.6f'></div>"
+        "<div><label>%s</label><input type='text' id='lon' name='lon' value='%.6f'></div>"
+        "</div>"
+        "<button type='button' class='geobtn' onclick='toggleMap()'>\xF0\x9F\x97\xBA\xEF\xB8\x8F %s</button>"
+        "<div id='map'></div>",
+        T(STR_WEB_LATITUDE), (double)g_radar_lat, T(STR_WEB_LONGITUDE), (double)g_radar_lon,
+        T(STR_WEB_SELECT_ON_MAP));
+    hb_append(&hb, "</div>"); // #tab-location
+
+    // ZAKLADKA: Wi-Fi & Network (domyslna w trybie AP/setup)
+    hb_append(&hb, "<div class='card tabpanel' id='tab-wifi' style='display:%s'><h2>\xF0\x9F\x93\xB6 %s</h2>",
+              ap_mode ? "block" : "none", T(STR_WEB_WIFI_SECTION));
+    hb_append(&hb,
+        "<label>%s</label>"
+        "<div class='scanrow'>"
+        "<input type='text' id='ssid-input' name='ssid' value='%s' maxlength='32' required>"
+        "<button type='button' class='btn-scan' id='btn-scan' onclick='scanWifi()'>\xF0\x9F\x94\x8D %s</button>"
+        "</div>"
+        "<select id='wifi-select' style='display:none;margin-top:8px;width:100%%;'></select>",
+        T(STR_WEB_SSID), g_wifi_ssid, T(STR_WEB_SCAN_NETWORKS));
+    hb_append(&hb, "<label>%s</label><input type='password' name='pass' value='' maxlength='64' placeholder='%s'>",
+              T(STR_WEB_PASSWORD), T(STR_WEB_PASS_PLACEHOLDER));
+    hb_append(&hb,
+        "<div class='statrow'><span>%s</span><span>%s</span></div>"
+        "<div class='statrow'><span>%s</span><span>%s</span></div>",
+        T(STR_WEB_CONN_STATUS), sta_connected ? T(STR_WEB_CONN_STA) : T(STR_WEB_CONN_AP),
+        T(STR_WEB_IP_ADDRESS), ip_str);
+    hb_append(&hb, "</div>"); // #tab-wifi
+
+    // ZAKLADKA: System
+    hb_append(&hb, "<div class='card tabpanel' id='tab-system' style='display:none'><h2>\xE2\x9A\x99\xEF\xB8\x8F %s</h2>", T(STR_WEB_TAB_SYSTEM));
+    hb_append(&hb,
+        "<label>%s</label>"
+        "<select name='lang'>"
+        "<option value='0' %s>English (Default)</option>"
+        "<option value='1' %s>Polski</option>"
+        "</select>",
+        T(STR_WEB_LANGUAGE), g_lang == 0 ? "selected" : "", g_lang == 1 ? "selected" : "");
+    hb_append(&hb, "<label>%s</label><input type='text' name='name' value='%s' maxlength='31'>",
+              T(STR_WEB_STATION_NAME), g_station_name);
+    hb_append(&hb,
+        "<div class='statrow'><span>%s</span><span>%s</span></div>",
+        T(STR_WEB_FIRMWARE_INFO), fw_full);
+
+    // Kopia zapasowa / przywracanie konfiguracji - eksport nie zawiera hasla
+    // Wi-Fi (bezpieczenstwo), import dziala poza formularzem (fetch JSON
+    // bezposrednio do /import_config), wiec nie rusza pol formularza.
+    hb_append(&hb,
+        "<div style='margin-top:18px;border-top:1px solid #30363d;padding-top:14px;'>"
+        "<label style='color:#00ff88;font-weight:bold;'>\xF0\x9F\x93\xA6 %s</label>"
+        "<button type='button' class='geobtn' onclick='exportConfig()'>\xF0\x9F\x92\xBE %s</button>"
+        "<div class='filerow'>"
+        "<input type='file' id='import-file' accept='.json'>"
+        "<button type='button' onclick='importConfig()'>%s</button>"
+        "</div>"
+        "<label style='margin-top:4px;'>%s</label>"
+        "<p id='import-status' class='hint'></p>"
+        "</div>",
+        T(STR_WEB_BACKUP_SECTION), T(STR_WEB_EXPORT_BTN), T(STR_WEB_IMPORT_BTN), T(STR_WEB_IMPORT_LABEL));
+
+    // Aktualizacja firmware przez przegladarke (surowe bajty .bin w ciele
+    // POST /update, postep liczony z xhr.upload.onprogress w JS).
+    hb_append(&hb,
+        "<div style='margin-top:18px;border-top:1px solid #30363d;padding-top:14px;'>"
+        "<label style='color:#00ff88;font-weight:bold;'>\xE2\x9A\xA1 %s</label>"
+        "<label style='margin-top:4px;'>%s</label>"
+        "<div class='filerow'>"
+        "<input type='file' id='ota-file' accept='.bin'>"
+        "<button type='button' id='ota-btn' onclick='flashFirmware()'>%s</button>"
+        "</div>"
+        "<div class='progress-wrap'><div id='ota-progress' class='progress-bar'></div></div>"
+        "<p id='ota-status' class='hint'></p>"
+        "</div>",
+        T(STR_WEB_OTA_SECTION), T(STR_WEB_OTA_FILE_LABEL), T(STR_WEB_OTA_BTN));
+
+    hb_append(&hb, "</div>"); // #tab-system
+
+    // Stala stopka wersji - poza tabpanelami (widoczna na kazdej zakladce),
+    // tuz nad przyciskiem zapisu.
+    hb_append(&hb,
+        "<div class='fw-footer'><span class='fw-label'>%s</span> <span class='fw-val'>%s</span></div>",
+        T(STR_WEB_FW_FOOTER_LABEL), fw_footer);
 
     hb_append(&hb,
         "<button type='submit' id='btn' class='btn-save'>\xF0\x9F\x92\xBE %s</button>"
@@ -472,9 +636,22 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 
     hb_append(&hb,
         "<script>"
+        "var IS_AP_MODE=%s;"
         "var I18N={scanning:'%s',scanFoundPrefix:'%s',scanFoundSuffix:'%s',scanNone:'%s',"
-        "saving:'%s',rebooting:'%s',saveError:'%s'};"
+        "saving:'%s',rebooting:'%s',saveError:'%s',"
+        "importOk:'%s',importError:'%s',importSelectFile:'%s',"
+        "otaUploading:'%s',otaOk:'%s',otaError:'%s',otaSelectFile:'%s'};"
         "var __map=null,__marker=null;"
+        "function showTab(name){"
+        "['display','location','wifi','system'].forEach(function(k){"
+        "var el=document.getElementById('tab-'+k);"
+        "if(el)el.style.display=(k===name)?'block':'none';"
+        "});"
+        "document.querySelectorAll('.tabbtn').forEach(function(b){"
+        "b.className='tabbtn'+(b.dataset.tab===name?' active':'');"
+        "});"
+        "if(name==='location'&&__map){setTimeout(function(){__map.invalidateSize();},150);}"
+        "}"
         "function toggleMap(){"
         "var m=document.getElementById('map');"
         "var show=(m.style.display!=='block');"
@@ -490,6 +667,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "document.getElementById('lat').value=e.latlng.lat.toFixed(6);"
         "document.getElementById('lon').value=e.latlng.lng.toFixed(6);"
         "});"
+        "setTimeout(function(){__map.invalidateSize();},100);"
         "}else if(show){"
         "setTimeout(function(){__map.invalidateSize();},150);"
         "}"
@@ -533,10 +711,61 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         ".catch(function(){st.textContent=I18N.saveError;btn.disabled=false;});"
         "return false;"
         "}"
+        "function exportConfig(){window.location.href='/export_config';}"
+        "function importConfig(){"
+        "var f=document.getElementById('import-file');"
+        "var st=document.getElementById('import-status');"
+        "if(!f.files||f.files.length===0){st.textContent=I18N.importSelectFile;return;}"
+        "var reader=new FileReader();"
+        "reader.onload=function(){"
+        "fetch('/import_config',{method:'POST',headers:{'Content-Type':'application/json'},body:reader.result})"
+        ".then(function(r){"
+        "if(!r.ok)throw new Error('bad');"
+        "st.textContent=I18N.importOk+' '+I18N.rebooting;"
+        "})"
+        ".catch(function(){st.textContent=I18N.importError;});"
+        "};"
+        "reader.readAsText(f.files[0]);"
+        "}"
+        "function flashFirmware(){"
+        "var f=document.getElementById('ota-file');"
+        "var st=document.getElementById('ota-status');"
+        "var bar=document.getElementById('ota-progress');"
+        "var btn=document.getElementById('ota-btn');"
+        "if(!f.files||f.files.length===0){st.textContent=I18N.otaSelectFile;return;}"
+        "btn.disabled=true;st.textContent=I18N.otaUploading;bar.style.width='0%%';"
+        "var xhr=new XMLHttpRequest();"
+        "xhr.open('POST','/update',true);"
+        "xhr.setRequestHeader('Content-Type','application/octet-stream');"
+        "xhr.upload.onprogress=function(e){"
+        "if(e.lengthComputable){"
+        "var pct=Math.round(e.loaded/e.total*100);"
+        "bar.style.width=pct+'%%';"
+        "st.textContent=I18N.otaUploading+' '+pct+'%%';"
+        "}"
+        "};"
+        "xhr.onload=function(){"
+        "if(xhr.status===200){"
+        "bar.style.width='100%%';"
+        "st.textContent=I18N.otaOk+' '+I18N.rebooting;"
+        "}else{"
+        "st.textContent=I18N.otaError;btn.disabled=false;"
+        "}"
+        "};"
+        "xhr.onerror=function(){st.textContent=I18N.otaError;btn.disabled=false;};"
+        "xhr.send(f.files[0]);"
+        "}"
+        "document.addEventListener('DOMContentLoaded',function(){"
+        "var isAP=IS_AP_MODE||(window.location.hostname==='192.168.4.1');"
+        "if(isAP){showTab('wifi');scanWifi();}"
+        "});"
         "</script>"
         "</body></html>",
+        ap_mode ? "true" : "false",
         T(STR_WEB_SCANNING), T(STR_WEB_SCAN_FOUND_PREFIX), T(STR_WEB_SCAN_FOUND_SUFFIX), T(STR_WEB_SCAN_NONE),
-        T(STR_WEB_SAVING_MSG), T(STR_WEB_REBOOTING_MSG), T(STR_WEB_SAVE_ERROR));
+        T(STR_WEB_SAVING_MSG), T(STR_WEB_REBOOTING_MSG), T(STR_WEB_SAVE_ERROR),
+        T(STR_WEB_IMPORT_OK), T(STR_WEB_IMPORT_ERROR), T(STR_WEB_IMPORT_SELECT_FILE),
+        T(STR_WEB_OTA_UPLOADING), T(STR_WEB_OTA_OK), T(STR_WEB_OTA_ERROR), T(STR_WEB_OTA_SELECT_FILE));
 
     if (hb.pos >= hb.cap - 1) {
         ESP_LOGE(TAG, "Strona WWW przekroczyla bufor %d B - odpowiedz ucieta!", HTML_PAGE_BUF_SIZE);
@@ -622,6 +851,15 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         url_decode(param);
         g_apts_mode = (atoi(param) == 1) ? 1 : 0;
     }
+    {
+        // Checkboxy nieodznaczone nie sa wysylane w formularzu - brak klucza
+        // oznacza wylaczony typ, wiec maska jest budowana od zera.
+        uint8_t mask = 0;
+        if (httpd_query_key_value(buf, "apt_civil", param, sizeof(param)) == ESP_OK) mask |= APT_TYPE_CIVIL;
+        if (httpd_query_key_value(buf, "apt_mil", param, sizeof(param)) == ESP_OK) mask |= APT_TYPE_MIL;
+        if (httpd_query_key_value(buf, "apt_ga", param, sizeof(param)) == ESP_OK) mask |= APT_TYPE_GA;
+        g_apt_filter_mask = mask;
+    }
     if (httpd_query_key_value(buf, "hide_ground", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
         g_hide_ground = (atoi(param) == 1) ? 1 : 0;
@@ -658,7 +896,230 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
 
-    xTaskCreate(restart_task, "wifi_restart", 2048, NULL, 5, NULL);
+    xTaskCreate(restart_task, "wifi_restart", 2048, (void *)(uintptr_t)1500, 5, NULL);
+    return ESP_OK;
+}
+
+// Eksport biezacej konfiguracji jako plik JSON do pobrania z przegladarki.
+// Haslo Wi-Fi celowo pominiete (bezpieczenstwo) - eksport sluzy do kopii
+// ustawien radaru, nie do przenoszenia poswiadczen sieciowych.
+static esp_err_t export_config_get_handler(httpd_req_t *req) {
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "station_name", g_station_name);
+    cJSON_AddStringToObject(root, "wifi_ssid", g_wifi_ssid);
+    cJSON_AddNumberToObject(root, "lat", (double)g_radar_lat);
+    cJSON_AddNumberToObject(root, "lon", (double)g_radar_lon);
+    cJSON_AddNumberToObject(root, "brightness", g_brightness);
+    cJSON_AddNumberToObject(root, "default_range", g_default_range);
+    cJSON_AddNumberToObject(root, "air_mode", g_air_mode);
+    cJSON_AddNumberToObject(root, "apts_mode", g_apts_mode);
+    cJSON_AddNumberToObject(root, "apt_filter_mask", g_apt_filter_mask);
+    cJSON_AddNumberToObject(root, "hide_ground", g_hide_ground);
+    cJSON_AddNumberToObject(root, "map_enabled", g_map_enabled);
+    cJSON_AddNumberToObject(root, "squawk_alert", g_squawk_alert_enabled);
+    cJSON_AddNumberToObject(root, "lang", g_lang);
+    cJSON_AddNumberToObject(root, "trail_len", g_trail_len);
+    cJSON_AddNumberToObject(root, "max_aircraft", g_max_aircraft);
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"radar_config.json\"");
+    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    free(json);
+    return ESP_OK;
+}
+
+#define IMPORT_BODY_MAX_LEN 2048
+
+// Import konfiguracji z pliku JSON (patrz export_config_get_handler dla
+// schematu pol) - kazde pole jest opcjonalne i walidowane tak samo jak w
+// save_post_handler, nieznane/brakujace klucze sa po prostu pomijane.
+static esp_err_t import_config_post_handler(httpd_req_t *req) {
+    int total_len = req->content_len;
+    if (total_len <= 0 || total_len > IMPORT_BODY_MAX_LEN) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    char *buf = malloc(total_len + 1);
+    if (!buf) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    int received = 0;
+    while (received < total_len) {
+        int ret = httpd_req_recv(req, buf + received, total_len - received);
+        if (ret <= 0) {
+            free(buf);
+            httpd_resp_send_500(req);
+            return ESP_FAIL;
+        }
+        received += ret;
+    }
+    buf[received] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "Invalid JSON");
+        return ESP_OK;
+    }
+
+    cJSON *item;
+    if ((item = cJSON_GetObjectItem(root, "station_name")) && cJSON_IsString(item)) {
+        snprintf(g_station_name, sizeof(g_station_name), "%s", item->valuestring);
+    }
+    if ((item = cJSON_GetObjectItem(root, "wifi_ssid")) && cJSON_IsString(item)) {
+        snprintf(g_wifi_ssid, sizeof(g_wifi_ssid), "%s", item->valuestring);
+    }
+    if ((item = cJSON_GetObjectItem(root, "lat")) && cJSON_IsNumber(item)) {
+        g_radar_lat = (float)item->valuedouble;
+    }
+    if ((item = cJSON_GetObjectItem(root, "lon")) && cJSON_IsNumber(item)) {
+        g_radar_lon = (float)item->valuedouble;
+    }
+    if ((item = cJSON_GetObjectItem(root, "brightness")) && cJSON_IsNumber(item)) {
+        int v = item->valueint;
+        if (v < BRIGHTNESS_MIN) v = BRIGHTNESS_MIN;
+        if (v > BRIGHTNESS_MAX) v = BRIGHTNESS_MAX;
+        g_brightness = (uint8_t)v;
+    }
+    if ((item = cJSON_GetObjectItem(root, "default_range")) && cJSON_IsNumber(item)) {
+        int v = item->valueint;
+        static const uint16_t valid_ranges[] = {10, 20, 30, 50, 100, 150, 200, 250};
+        bool valid = false;
+        for (size_t i = 0; i < sizeof(valid_ranges) / sizeof(valid_ranges[0]); i++) {
+            if (valid_ranges[i] == v) { valid = true; break; }
+        }
+        g_default_range = valid ? (uint16_t)v : DEFAULT_RANGE_DEFAULT;
+    }
+    if ((item = cJSON_GetObjectItem(root, "air_mode")) && cJSON_IsNumber(item)) {
+        int v = item->valueint;
+        g_air_mode = (v >= 0 && v <= 2) ? (uint8_t)v : AIR_MODE_DEFAULT;
+    }
+    if ((item = cJSON_GetObjectItem(root, "apts_mode")) && cJSON_IsNumber(item)) {
+        g_apts_mode = (item->valueint == 1) ? 1 : 0;
+    }
+    if ((item = cJSON_GetObjectItem(root, "apt_filter_mask")) && cJSON_IsNumber(item)) {
+        int v = item->valueint;
+        g_apt_filter_mask = (v >= 0 && (v & ~APT_TYPE_ALL) == 0) ? (uint8_t)v : APT_FILTER_MASK_DEFAULT;
+    }
+    if ((item = cJSON_GetObjectItem(root, "hide_ground")) && cJSON_IsNumber(item)) {
+        g_hide_ground = (item->valueint == 1) ? 1 : 0;
+    }
+    if ((item = cJSON_GetObjectItem(root, "map_enabled")) && cJSON_IsNumber(item)) {
+        g_map_enabled = (item->valueint == 1) ? 1 : 0;
+    }
+    if ((item = cJSON_GetObjectItem(root, "squawk_alert")) && cJSON_IsNumber(item)) {
+        g_squawk_alert_enabled = (item->valueint == 1) ? 1 : 0;
+    }
+    if ((item = cJSON_GetObjectItem(root, "lang")) && cJSON_IsNumber(item)) {
+        wifi_mgr_set_lang((app_lang_t)item->valueint);
+    }
+    if ((item = cJSON_GetObjectItem(root, "trail_len")) && cJSON_IsNumber(item)) {
+        wifi_mgr_set_trail_len((uint8_t)item->valueint);
+    }
+    if ((item = cJSON_GetObjectItem(root, "max_aircraft")) && cJSON_IsNumber(item)) {
+        wifi_mgr_set_max_aircraft((uint16_t)item->valueint);
+    }
+    cJSON_Delete(root);
+
+    save_settings_to_nvs();
+    ESP_LOGI(TAG, "Zaimportowano konfiguracje z pliku JSON, restart urzadzenia...");
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+
+    xTaskCreate(restart_task, "wifi_restart", 2048, (void *)(uintptr_t)1500, 5, NULL);
+    return ESP_OK;
+}
+
+#define OTA_RECV_CHUNK_SIZE 4096
+
+// Aktualizacja firmware przez przegladarke: cialo POST /update to surowe
+// bajty pliku .bin (bez multipart), strumieniowane wprost do partycji OTA.
+// Po powodzeniu restart nastepuje z ~2s opoznieniem (patrz restart_task),
+// zeby przegladarka zdazyla wyswietlic komunikat/pasek postepu na 100%.
+static esp_err_t update_post_handler(httpd_req_t *req) {
+    int total_len = req->content_len;
+    if (total_len <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (!update_partition) {
+        ESP_LOGE(TAG, "OTA: brak wolnej partycji aktualizacji");
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    esp_ota_handle_t ota_handle;
+    esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: esp_ota_begin nieudane: %s", esp_err_to_name(err));
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    char *buf = malloc(OTA_RECV_CHUNK_SIZE);
+    if (!buf) {
+        esp_ota_abort(ota_handle);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    int remaining = total_len;
+    bool ota_failed = false;
+    while (remaining > 0) {
+        int to_read = remaining < OTA_RECV_CHUNK_SIZE ? remaining : OTA_RECV_CHUNK_SIZE;
+        int ret = httpd_req_recv(req, buf, to_read);
+        if (ret <= 0) {
+            ota_failed = true;
+            break;
+        }
+        if (esp_ota_write(ota_handle, buf, ret) != ESP_OK) {
+            ota_failed = true;
+            break;
+        }
+        remaining -= ret;
+    }
+    free(buf);
+
+    if (ota_failed) {
+        esp_ota_abort(ota_handle);
+        ESP_LOGE(TAG, "OTA: blad odbioru/zapisu firmware");
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: esp_ota_end nieudane (uszkodzony obraz?): %s", esp_err_to_name(err));
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA: esp_ota_set_boot_partition nieudane: %s", esp_err_to_name(err));
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "OTA: firmware zapisany pomyslnie (%d B), restart za 2s...", total_len);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+
+    xTaskCreate(restart_task, "ota_restart", 2048, (void *)(uintptr_t)2000, 5, NULL);
     return ESP_OK;
 }
 
@@ -789,12 +1250,18 @@ static void start_web_server(void) {
     httpd_uri_t save_uri = {.uri = "/save", .method = HTTP_POST, .handler = save_post_handler};
     httpd_uri_t brightness_uri = {.uri = "/set_brightness", .method = HTTP_GET, .handler = set_brightness_get_handler};
     httpd_uri_t scan_uri = {.uri = "/scan", .method = HTTP_GET, .handler = scan_get_handler};
+    httpd_uri_t export_uri = {.uri = "/export_config", .method = HTTP_GET, .handler = export_config_get_handler};
+    httpd_uri_t import_uri = {.uri = "/import_config", .method = HTTP_POST, .handler = import_config_post_handler};
+    httpd_uri_t update_uri = {.uri = "/update", .method = HTTP_POST, .handler = update_post_handler};
 
     if (httpd_start(&g_web_server, &config) == ESP_OK) {
         httpd_register_uri_handler(g_web_server, &root_uri);
         httpd_register_uri_handler(g_web_server, &save_uri);
         httpd_register_uri_handler(g_web_server, &brightness_uri);
         httpd_register_uri_handler(g_web_server, &scan_uri);
+        httpd_register_uri_handler(g_web_server, &export_uri);
+        httpd_register_uri_handler(g_web_server, &import_uri);
+        httpd_register_uri_handler(g_web_server, &update_uri);
         ESP_LOGI(TAG, "Panel WWW konfiguracji radaru uruchomiony na porcie 80!");
     }
 }

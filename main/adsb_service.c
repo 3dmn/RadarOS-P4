@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <ctype.h>
 #include <inttypes.h>
 
 #include "freertos/FreeRTOS.h"
@@ -216,6 +217,37 @@ static bool detect_military(const char *block, const char *end, const char *call
     return false;
 }
 
+// Czysci callsign z paddingu 6-bit ADS-B ('@' = kod 0x00) i innych znakow
+// niedrukowalnych, po czym obcina wiodace/koncowe spacje. Jesli po czyszczeniu
+// nic nie zostanie (samo padding/spacje/pusty string), podstawia czytelny
+// adres ICAO Hex (wielkimi literami) zamiast pustego/smieciowego identyfikatora.
+static void sanitize_callsign(char *cs, size_t cs_size, const char *hex) {
+    for (size_t i = 0; cs[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)cs[i];
+        if (c == '@' || c < 0x20 || c > 0x7E) cs[i] = ' ';
+    }
+
+    size_t len = strlen(cs);
+    size_t start = 0;
+    while (start < len && cs[start] == ' ') start++;
+    size_t end = len;
+    while (end > start && cs[end - 1] == ' ') end--;
+    size_t out_len = end - start;
+
+    if (out_len > 0) {
+        memmove(cs, cs + start, out_len);
+    }
+    cs[out_len] = '\0';
+
+    if (cs[0] == '\0' && hex) {
+        size_t i = 0;
+        for (; i < cs_size - 1 && hex[i] != '\0'; i++) {
+            cs[i] = (char)toupper((unsigned char)hex[i]);
+        }
+        cs[i] = '\0';
+    }
+}
+
 static int parse_adsb_json(const char *json, AircraftData *out_planes, int max_planes) {
     if (!json || !out_planes) return 0;
     int count = 0;
@@ -234,7 +266,7 @@ static int parse_adsb_json(const char *json, AircraftData *out_planes, int max_p
 
         json_get_str(p, end, "hex", plane->hex, sizeof(plane->hex));
         json_get_str(p, end, "flight", plane->callsign, sizeof(plane->callsign));
-        for (int s = strlen(plane->callsign) - 1; s >= 0 && plane->callsign[s] == ' '; s--) plane->callsign[s] = '\0';
+        sanitize_callsign(plane->callsign, sizeof(plane->callsign), plane->hex);
 
         json_get_str(p, end, "r", plane->registration, sizeof(plane->registration));
         json_get_str(p, end, "t", plane->model, sizeof(plane->model));

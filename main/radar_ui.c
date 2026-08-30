@@ -12,6 +12,7 @@
 #include "lvgl.h"
 
 #include "aircraft_types.h"
+#include "airports.h"
 #include "adsb_service.h"
 #include "wifi_manager.h"
 #include "radar_ui.h"
@@ -33,14 +34,16 @@ static air_filter_mode_t air_filter_mode = AIR_FILTER_ALL;
 static bool show_airports = true;
 static bool hide_ground_traffic = true;
 
+// Pula slotow UI dla lotnisk - stala wielkosc niezalezna od rozmiaru globalnej
+// bazy (airports.h), zeby utrzymac 60 FPS przy setkach wpisow w bazie.
+#define MAX_VISIBLE_AIRPORTS 40
+
 typedef struct {
     lv_obj_t *marker;
     lv_obj_t *label;
-    float distance_km;
-    float bearing_deg;
 } AirportSlotUI;
 
-static AirportSlotUI ui_airports[NUM_AIRPORTS];
+static AirportSlotUI ui_airports[MAX_VISIBLE_AIRPORTS];
 
 typedef struct {
     lv_obj_t *radar_vector;
@@ -283,8 +286,7 @@ void radar_ui_refresh(void) {
                                     : ui_slots[i].calc_is_lpr    ? COLOR_LPR
                                                                   : get_fr24_altitude_color(live_fleet[i].altitude_ft);
 
-            snprintf(ui_slots[i].calc_id, sizeof(ui_slots[i].calc_id), "%s",
-                     live_fleet[i].callsign[0] ? live_fleet[i].callsign : live_fleet[i].hex);
+            snprintf(ui_slots[i].calc_id, sizeof(ui_slots[i].calc_id), "%s", live_fleet[i].callsign);
             ui_slots[i].calc_altitude_ft = live_fleet[i].altitude_ft;
             snprintf(ui_slots[i].calc_model, sizeof(ui_slots[i].calc_model), "%s", live_fleet[i].model);
             ui_slots[i].calc_distance_km = live_fleet[i].distance_km;
@@ -343,7 +345,7 @@ void radar_ui_refresh(void) {
             emg_active = true;
             emg_label = lbl;
             snprintf(emg_squawk, sizeof(emg_squawk), "%s", live_fleet[i].squawk);
-            snprintf(emg_id, sizeof(emg_id), "%s", live_fleet[i].callsign[0] ? live_fleet[i].callsign : live_fleet[i].hex);
+            snprintf(emg_id, sizeof(emg_id), "%s", live_fleet[i].callsign);
             emg_alt = live_fleet[i].altitude_ft;
             emg_dist = live_fleet[i].distance_km;
         }
@@ -362,7 +364,7 @@ void radar_ui_refresh(void) {
 
     if (has_selection) {
         snprintf(sel_hex, sizeof(sel_hex), "%s", selected_ac->hex);
-        snprintf(sel_id, sizeof(sel_id), "%s", selected_ac->callsign[0] ? selected_ac->callsign : selected_ac->hex);
+        snprintf(sel_id, sizeof(sel_id), "%s", selected_ac->callsign);
         snprintf(sel_model, sizeof(sel_model), "%s", selected_ac->model);
         snprintf(sel_reg, sizeof(sel_reg), "%s", selected_ac->registration);
         snprintf(sel_vsi, sizeof(sel_vsi), "%s", selected_ac->vsi_str);
@@ -385,26 +387,44 @@ void radar_ui_refresh(void) {
         return;
     }
 
-    // Pozycjonowanie lotnisk (dane statyczne, nie wymagaja adsb_service_lock)
-    for (size_t i = 0; i < NUM_AIRPORTS; i++) {
-        if (show_airports && (ui_airports[i].distance_km <= current_range_km)) {
-            float rad = ui_airports[i].bearing_deg * DEG_TO_RAD;
-            int px = RADAR_CENTER_X + (int)(ui_airports[i].distance_km * scale * sinf(rad));
-            int py = RADAR_CENTER_Y - (int)(ui_airports[i].distance_km * scale * cosf(rad));
+    // Pozycjonowanie lotnisk: najpierw szybki filtr bounding-box (odchylka
+    // lat/lon wyliczona z biezacego promienia radaru), dopiero dla kandydatow
+    // liczymy dokladny dystans/bearing i pikselowa pozycje. Dzieki temu
+    // globalna baza lotnisk (airports.h) nie obciaza renderu - rysujemy co
+    // najwyzej MAX_VISIBLE_AIRPORTS obiektow, wylacznie w zasiegu radaru.
+    int airport_slot = 0;
+    if (show_airports) {
+        uint8_t apt_mask = wifi_mgr_get_apt_filter_mask();
+        float dlat_max = current_range_km / 111.132f;
+        float coslat = fabsf(cosf(g_radar_lat * DEG_TO_RAD));
+        float dlon_max = current_range_km / (111.132f * (coslat > 0.01f ? coslat : 0.01f));
 
-            if (px >= 10 && px <= (MAP_SIZE - 10) && py >= 10 && py <= (MAP_SIZE - 10)) {
-                lv_obj_set_hidden(ui_airports[i].marker, false);
-                lv_obj_set_hidden(ui_airports[i].label, false);
-                lv_obj_set_pos(ui_airports[i].marker, px - 3, py - 3);
-                lv_obj_set_pos(ui_airports[i].label, px + 6, py - 6);
-            } else {
-                lv_obj_set_hidden(ui_airports[i].marker, true);
-                lv_obj_set_hidden(ui_airports[i].label, true);
-            }
-        } else {
-            lv_obj_set_hidden(ui_airports[i].marker, true);
-            lv_obj_set_hidden(ui_airports[i].label, true);
+        for (size_t i = 0; i < GLOBAL_AIRPORTS_COUNT && airport_slot < MAX_VISIBLE_AIRPORTS; i++) {
+            const airport_t *ap = &global_airports[i];
+            if (!(ap->type & apt_mask)) continue;
+            if (fabsf(ap->lat - g_radar_lat) > dlat_max) continue;
+            if (fabsf(ap->lon - g_radar_lon) > dlon_max) continue;
+
+            float dist_km, bearing_deg;
+            calculate_coords(ap->lat, ap->lon, &dist_km, &bearing_deg);
+            if (dist_km > current_range_km) continue;
+
+            float rad = bearing_deg * DEG_TO_RAD;
+            int px = RADAR_CENTER_X + (int)(dist_km * scale * sinf(rad));
+            int py = RADAR_CENTER_Y - (int)(dist_km * scale * cosf(rad));
+            if (px < 10 || px > (MAP_SIZE - 10) || py < 10 || py > (MAP_SIZE - 10)) continue;
+
+            AirportSlotUI *slot = &ui_airports[airport_slot++];
+            lv_label_set_text_fmt(slot->label, "%s\n%s", ap->icao, ap->name);
+            lv_obj_set_pos(slot->marker, px - 3, py - 3);
+            lv_obj_set_pos(slot->label, px + 6, py - 6);
+            lv_obj_set_hidden(slot->marker, false);
+            lv_obj_set_hidden(slot->label, false);
         }
+    }
+    for (; airport_slot < MAX_VISIBLE_AIRPORTS; airport_slot++) {
+        lv_obj_set_hidden(ui_airports[airport_slot].marker, true);
+        lv_obj_set_hidden(ui_airports[airport_slot].label, true);
     }
 
     for(int i = 0; i < MAX_AIRCRAFT_CAPACITY; i++) {
@@ -827,10 +847,7 @@ void radar_ui_build(void) {
         lv_obj_align(lbl, card_aligns[i], card_ox[i], card_oy[i]);
     }
 
-    for (size_t i = 0; i < NUM_AIRPORTS; i++) {
-        calculate_coords(nearby_airports[i].lat, nearby_airports[i].lon,
-                         &ui_airports[i].distance_km, &ui_airports[i].bearing_deg);
-
+    for (int i = 0; i < MAX_VISIBLE_AIRPORTS; i++) {
         ui_airports[i].marker = lv_obj_create(radar_area);
         lv_obj_set_size(ui_airports[i].marker, 6, 6);
         lv_obj_set_style_radius(ui_airports[i].marker, 1, 0);
@@ -840,7 +857,6 @@ void radar_ui_build(void) {
         lv_obj_clear_flag(ui_airports[i].marker, LV_OBJ_FLAG_SCROLLABLE);
 
         ui_airports[i].label = lv_label_create(radar_area);
-        lv_label_set_text_fmt(ui_airports[i].label, "%s\n%s", nearby_airports[i].icao, nearby_airports[i].name);
         lv_obj_set_style_text_color(ui_airports[i].label, lv_color_hex(0x38bdf8), 0);
         lv_obj_set_hidden(ui_airports[i].marker, true);
         lv_obj_set_hidden(ui_airports[i].label, true);

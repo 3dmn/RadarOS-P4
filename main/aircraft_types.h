@@ -85,28 +85,7 @@ typedef struct {
     bool on_ground;
 } AircraftData;
 
-typedef struct {
-    const char *icao;
-    const char *name;
-    float lat;
-    float lon;
-} AirportInfo;
-
-static const AirportInfo nearby_airports[] = {
-    {"EPWA", "Warszawa",      52.1657f, 20.9671f},
-    {"EPMO", "Modlin",        52.4511f, 20.6518f},
-    {"EPLL", "Lodz",          51.7219f, 19.3981f},
-    {"EPBY", "Bydgoszcz",     53.0968f, 17.9777f},
-    {"EPPO", "Poznan",        52.4210f, 16.8260f},
-    {"EPRA", "Radom",         51.3888f, 21.2130f},
-    {"EPLB", "Lublin",        51.2403f, 22.7136f},
-    {"EPSY", "Szymany",       53.4819f, 20.9422f},
-    {"EPGD", "Gdansk",        54.3776f, 18.4662f},
-    {"EPOD", "Olsztyn",       53.7744f, 20.4194f},
-    {"EPTO", "Torun",         53.0294f, 18.5436f},
-    {"EPPL", "Plock",         52.5628f, 19.7211f}
-};
-#define NUM_AIRPORTS (sizeof(nearby_airports) / sizeof(nearby_airports[0]))
+// Baza lotnisk (global_airports) przeniesiona do main/airports.h / airports.c.
 
 static const float range_steps[] = {250.0f, 200.0f, 150.0f, 100.0f, 50.0f, 30.0f, 20.0f, 10.0f};
 #define NUM_RANGE_STEPS (sizeof(range_steps) / sizeof(range_steps[0]))

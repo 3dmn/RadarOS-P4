@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 #include "i18n.h"
+#include "airports.h"
 
 #define STATION_NAME_LEN  32
 #define WIFI_SSID_MAX_LEN 33
@@ -34,6 +35,10 @@ uint8_t wifi_mgr_get_default_air_mode(void);
 
 // Domyslny stan wyswietlania lotnisk z NVS (1 = ON, 0 = OFF).
 uint8_t wifi_mgr_get_default_apts_mode(void);
+
+// Maska typow lotnisk widocznych na radarze z NVS (bity APT_TYPE_* z
+// airports.h). Domyslnie wszystkie typy wlaczone.
+uint8_t wifi_mgr_get_apt_filter_mask(void);
 
 // Czy domyslnie ukrywac ruch naziemny (samoloty on_ground) z NVS.
 bool wifi_mgr_get_hide_ground(void);
