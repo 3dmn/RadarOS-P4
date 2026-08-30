@@ -1456,9 +1456,11 @@ void radar_ui_build(void) {
     lv_obj_set_style_bg_opa(top_bar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(top_bar, 0, 0);
     lv_obj_set_style_pad_all(top_bar, 0, 0);
-    lv_obj_set_style_pad_column(top_bar, 2, 0);
-    lv_obj_set_style_pad_left(top_bar, 2, 0);
-    lv_obj_set_style_pad_right(top_bar, 2, 0);
+    // Clear column gap and symmetric side margins so the buttons read as
+    // distinct, separated pills instead of blending into each other.
+    lv_obj_set_style_pad_column(top_bar, 6, 0);
+    lv_obj_set_style_pad_left(top_bar, 6, 0);
+    lv_obj_set_style_pad_right(top_bar, 6, 0);
     lv_obj_clear_flag(top_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(top_bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top_bar, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1469,14 +1471,15 @@ void radar_ui_build(void) {
     lv_obj_set_style_border_color(btn_airport_toggle, lv_color_hex(0x005522), 0);
     lv_obj_set_style_border_width(btn_airport_toggle, 1, 0);
     lv_obj_set_style_radius(btn_airport_toggle, 6, 0);
-    lv_obj_set_style_pad_hor(btn_airport_toggle, 2, 0);
-    lv_obj_set_style_pad_ver(btn_airport_toggle, 0, 0);
+    lv_obj_set_style_pad_hor(btn_airport_toggle, 5, 0);
+    lv_obj_set_style_pad_ver(btn_airport_toggle, 2, 0);
     lv_obj_add_flag(btn_airport_toggle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_airport_toggle, airport_toggle_click_event_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_airport_toggle = lv_label_create(btn_airport_toggle);
     lv_label_set_text(lbl_airport_toggle, show_airports ? "APTS: ON" : "APTS: OFF");
     lv_obj_set_style_text_color(lbl_airport_toggle, lv_color_hex(0x00ff88), 0);
+    lv_obj_set_style_text_font(lbl_airport_toggle, &lv_font_montserrat_12, 0);
     lv_obj_center(lbl_airport_toggle);
     if (!show_airports) {
         lv_obj_set_style_bg_color(btn_airport_toggle, lv_color_hex(0x550000), 0);
@@ -1489,12 +1492,13 @@ void radar_ui_build(void) {
     lv_obj_set_style_border_color(btn_filter_ground, lv_color_hex(0x005522), 0);
     lv_obj_set_style_border_width(btn_filter_ground, 1, 0);
     lv_obj_set_style_radius(btn_filter_ground, 6, 0);
-    lv_obj_set_style_pad_hor(btn_filter_ground, 2, 0);
-    lv_obj_set_style_pad_ver(btn_filter_ground, 0, 0);
+    lv_obj_set_style_pad_hor(btn_filter_ground, 5, 0);
+    lv_obj_set_style_pad_ver(btn_filter_ground, 2, 0);
     lv_obj_add_flag(btn_filter_ground, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_filter_ground, filter_click_event_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_filter_ground = lv_label_create(btn_filter_ground);
+    lv_obj_set_style_text_font(lbl_filter_ground, &lv_font_montserrat_12, 0);
     lv_obj_center(lbl_filter_ground);
     apply_air_filter_style();
 
@@ -1502,12 +1506,13 @@ void radar_ui_build(void) {
     lv_obj_set_size(btn_gnd_toggle, LV_SIZE_CONTENT, 26);
     lv_obj_set_style_border_width(btn_gnd_toggle, 1, 0);
     lv_obj_set_style_radius(btn_gnd_toggle, 6, 0);
-    lv_obj_set_style_pad_hor(btn_gnd_toggle, 2, 0);
-    lv_obj_set_style_pad_ver(btn_gnd_toggle, 0, 0);
+    lv_obj_set_style_pad_hor(btn_gnd_toggle, 5, 0);
+    lv_obj_set_style_pad_ver(btn_gnd_toggle, 2, 0);
     lv_obj_add_flag(btn_gnd_toggle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_gnd_toggle, gnd_toggle_click_event_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_gnd_toggle = lv_label_create(btn_gnd_toggle);
+    lv_obj_set_style_text_font(lbl_gnd_toggle, &lv_font_montserrat_12, 0);
     lv_obj_center(lbl_gnd_toggle);
     apply_gnd_filter_style();
 
@@ -1515,12 +1520,13 @@ void radar_ui_build(void) {
     lv_obj_set_size(btn_map_toggle, LV_SIZE_CONTENT, 26);
     lv_obj_set_style_border_width(btn_map_toggle, 1, 0);
     lv_obj_set_style_radius(btn_map_toggle, 6, 0);
-    lv_obj_set_style_pad_hor(btn_map_toggle, 2, 0);
-    lv_obj_set_style_pad_ver(btn_map_toggle, 0, 0);
+    lv_obj_set_style_pad_hor(btn_map_toggle, 5, 0);
+    lv_obj_set_style_pad_ver(btn_map_toggle, 2, 0);
     lv_obj_add_flag(btn_map_toggle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_map_toggle, map_toggle_click_event_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_map_toggle = lv_label_create(btn_map_toggle);
+    lv_obj_set_style_text_font(lbl_map_toggle, &lv_font_montserrat_12, 0);
     lv_obj_center(lbl_map_toggle);
     apply_map_toggle_style();
 
@@ -1531,8 +1537,8 @@ void radar_ui_build(void) {
     lv_obj_set_style_border_color(btn_range, lv_color_hex(0x00ff88), 0);
     lv_obj_set_style_border_width(btn_range, 1, 0);
     lv_obj_set_style_radius(btn_range, 6, 0);
-    lv_obj_set_style_pad_hor(btn_range, 2, 0);
-    lv_obj_set_style_pad_ver(btn_range, 0, 0);
+    lv_obj_set_style_pad_hor(btn_range, 5, 0);
+    lv_obj_set_style_pad_ver(btn_range, 2, 0);
     lv_obj_add_flag(btn_range, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_range, range_click_event_cb, LV_EVENT_CLICKED, NULL);
 
@@ -1540,6 +1546,7 @@ void radar_ui_build(void) {
     lv_label_set_long_mode(lbl_range_header, LV_LABEL_LONG_CLIP);
     lv_label_set_text_fmt(lbl_range_header, "RNG: %.0fKM", range_steps[current_range_idx]);
     lv_obj_set_style_text_color(lbl_range_header, lv_color_hex(0x00ff88), 0);
+    lv_obj_set_style_text_font(lbl_range_header, &lv_font_montserrat_12, 0);
     lv_obj_center(lbl_range_header);
 
     lbl_status_count = lv_label_create(right_panel);

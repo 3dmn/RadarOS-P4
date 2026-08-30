@@ -311,6 +311,12 @@ static void process_reload(float lat, float lon, float range_km, uint32_t my_gen
             int dst_y0 = RADAR_CENTER_Y + (int)roundf((float)(ty - ytile_f) * TILE_SIZE);
             darken_and_blit_tile(rgb, w, h, dst_x0, dst_y0);
             stbi_image_free(rgb);
+
+            // Extra pacing after decode/blit (on top of the 350 ms pause
+            // above, taken right after the fetch) - gives the SDIO bus and
+            // its DMA buffers a full window to drain before the next TLS
+            // handshake starts.
+            vTaskDelay(pdMS_TO_TICKS(80));
         }
     }
 
