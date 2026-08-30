@@ -136,10 +136,3 @@ bool wifi_mgr_get_mqtt_enabled(void);
 // Whether to publish Home Assistant MQTT Discovery config topics on
 // connect, from NVS.
 bool wifi_mgr_get_mqtt_ha_discovery(void);
-
-// Whether ota_update_service.c should automatically download and flash a
-// newer firmware release as soon as one is detected, from NVS. Off by
-// default (safe: checking for updates never auto-installs unless the user
-// explicitly opts in). Persisted immediately on change.
-bool wifi_mgr_get_auto_update_enabled(void);
-void wifi_mgr_set_auto_update_en(bool on);

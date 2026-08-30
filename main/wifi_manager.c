@@ -53,7 +53,6 @@
 #define MQTT_PORT_DEFAULT       1883
 #define MQTT_HA_DISCOVERY_DEFAULT 1
 #define MQTT_DEVICE_ID_DEFAULT  "radaros_p4"
-#define AUTO_UPDATE_DEFAULT     0
 
 #define AP_SSID                 "RadarADSB-Setup"
 #define AP_CHANNEL               1
@@ -92,7 +91,6 @@ char g_mqtt_user[MQTT_USER_LEN] = "";
 char g_mqtt_pass[MQTT_PASS_LEN] = "";
 char g_mqtt_device_id[MQTT_DEVICE_ID_LEN] = MQTT_DEVICE_ID_DEFAULT;
 char g_ota_version_url[OTA_VERSION_URL_LEN] = "";
-static uint8_t g_auto_update_enabled = AUTO_UPDATE_DEFAULT;
 SemaphoreHandle_t g_https_mutex = NULL;
 
 static bool is_valid_trail_len(uint8_t len) {
@@ -193,8 +191,6 @@ static void load_settings_from_nvs(void) {
     }
     len = sizeof(g_ota_version_url);
     nvs_get_str(my_handle, "ota_url", g_ota_version_url, &len);
-    nvs_get_u8(my_handle, "auto_upd", &g_auto_update_enabled);
-    if (g_auto_update_enabled > 1) g_auto_update_enabled = AUTO_UPDATE_DEFAULT;
 
     nvs_close(my_handle);
     ESP_LOGI(TAG, "Loaded from NVS: SSID='%s' station='%s' (%.6f, %.6f)",
@@ -230,7 +226,6 @@ static void save_settings_to_nvs(void) {
     nvs_set_str(my_handle, "mqtt_pass", g_mqtt_pass);
     nvs_set_str(my_handle, "mqtt_devid", g_mqtt_device_id);
     nvs_set_str(my_handle, "ota_url", g_ota_version_url);
-    nvs_set_u8(my_handle, "auto_upd", g_auto_update_enabled);
     nvs_commit(my_handle);
     nvs_close(my_handle);
 }
@@ -348,15 +343,6 @@ bool wifi_mgr_get_mqtt_enabled(void) {
 
 bool wifi_mgr_get_mqtt_ha_discovery(void) {
     return g_mqtt_ha_discovery == 1;
-}
-
-bool wifi_mgr_get_auto_update_enabled(void) {
-    return g_auto_update_enabled == 1;
-}
-
-void wifi_mgr_set_auto_update_en(bool on) {
-    g_auto_update_enabled = on ? 1 : 0;
-    save_settings_to_nvs();
 }
 
 // ================= WEB PANEL =================
@@ -793,9 +779,6 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
             "<label style='margin-top:8px;'>%s</label>"
             "<input type='text' id='ota_url_input' name='ota_url' value='%s' maxlength='191' placeholder='https://.../version.json'>"
             "<label style='margin-top:2px;'>%s</label>"
-            "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
-            "<label class=\"switch\"><input type=\"checkbox\" name=\"auto_update_en\" value=\"1\" %s>"
-            "<span class=\"slider\"></span></label></div>"
             "<button type='button' class='geobtn' style='margin-top:10px;' id='btn_check_update' onclick='checkOtaUpdate(event)'>%s</button>"
             "<p id='check-update-status' class='hint'></p>"
             "<a id='btn_download_update' href='%s' target='_blank' rel='noopener' class='geobtn' "
@@ -807,7 +790,6 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
             T(STR_WEB_FWUPD_LATEST), latest_line,
             T(STR_WEB_FWUPD_REPO), ota_update_get_manifest_url(),
             T(STR_WEB_FWUPD_REPO_HINT),
-            T(STR_WEB_FWUPD_AUTO), g_auto_update_enabled == 1 ? "checked" : "",
             T(STR_WEB_FWUPD_CHECK_BTN),
             release_url, upd_avail ? "block" : "none", download_btn_label,
             upd_avail ? "block" : "none", T(STR_WEB_FWUPD_DOWNLOAD_HINT));
@@ -1201,7 +1183,6 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         url_decode(param);
         snprintf(g_ota_version_url, sizeof(g_ota_version_url), "%s", param);
     }
-    g_auto_update_enabled = (httpd_query_key_value(buf, "auto_update_en", param, sizeof(param)) == ESP_OK) ? 1 : 0;
     free(buf);
 
     save_settings_to_nvs();
@@ -1243,7 +1224,6 @@ static esp_err_t export_config_get_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(root, "mqtt_device_id", g_mqtt_device_id);
     cJSON_AddNumberToObject(root, "mqtt_ha_discovery", g_mqtt_ha_discovery);
     cJSON_AddStringToObject(root, "ota_url", g_ota_version_url);
-    cJSON_AddNumberToObject(root, "auto_update_enabled", g_auto_update_enabled);
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1375,9 +1355,6 @@ static esp_err_t import_config_post_handler(httpd_req_t *req) {
     }
     if ((item = cJSON_GetObjectItem(root, "ota_url")) && cJSON_IsString(item)) {
         snprintf(g_ota_version_url, sizeof(g_ota_version_url), "%s", item->valuestring);
-    }
-    if ((item = cJSON_GetObjectItem(root, "auto_update_enabled")) && cJSON_IsNumber(item)) {
-        g_auto_update_enabled = (item->valueint == 1) ? 1 : 0;
     }
     cJSON_Delete(root);
 

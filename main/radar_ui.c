@@ -335,6 +335,11 @@ void radar_ui_refresh(void) {
 
             ui_slots[i].calc_visible = true;
 
+            // Bearing 0 (north) must place the target ABOVE the center, i.e.
+            // a SMALLER py - matches the map canvas's tile_y convention in
+            // map_tile_service.c (north = smaller Y), so aircraft always
+            // line up with the map background underneath them. Do not swap
+            // this to "+" - that would put north-bound traffic below center.
             float rad = live_fleet[i].bearing_deg * DEG_TO_RAD;
             int px = RADAR_CENTER_X + (int)(live_fleet[i].distance_km * scale * sinf(rad));
             int py = RADAR_CENTER_Y - (int)(live_fleet[i].distance_km * scale * cosf(rad));

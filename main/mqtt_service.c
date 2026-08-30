@@ -188,6 +188,23 @@ static void publish_update_state(void) {
     publish_json(topic, root, true);
 }
 
+// Entities published by older firmware versions that no longer exist -
+// publishing an empty payload (retained) to their old config/state topics
+// makes Home Assistant delete the stale entity immediately instead of
+// leaving an orphaned "unavailable" card. Safe to call every time
+// publish_all_discovery() runs; an empty retained message is a no-op once
+// the broker has already dropped the original retained message.
+static void unpublish_removed_entities(void) {
+    char cfg_topic[MQTT_TOPIC_MAX_LEN], state_topic[MQTT_TOPIC_MAX_LEN];
+
+    // switch.auto_update - removed, direct in-device installation was
+    // dropped in favor of a notification-only update.firmware entity.
+    topic_build(cfg_topic, sizeof(cfg_topic), "switch", "auto_update", "config");
+    topic_build(state_topic, sizeof(state_topic), "switch", "auto_update", "state");
+    esp_mqtt_client_publish(s_client, cfg_topic, "", 0, 1, 1);
+    esp_mqtt_client_publish(s_client, state_topic, "", 0, 1, 1);
+}
+
 static const char *RANGE_OPTIONS[] = {"10 km", "20 km", "30 km", "50 km", "100 km", "150 km", "200 km", "250 km"};
 static const char *AIR_FILTER_OPTIONS[] = {"All", "Civil Only", "Military & Rescue"};
 static const char *TRAIL_LEN_OPTIONS[] = {"Short", "Medium", "Long", "Maximum"};
@@ -308,16 +325,12 @@ static void publish_all_discovery(void) {
     publish_discovery_entity(&s);
 
     memset(&s, 0, sizeof(s));
-    s.component = "switch"; s.object_id = "auto_update"; s.name = "Auto-Update";
-    s.icon = "mdi:cloud-sync-outline"; s.has_command = true; s.has_state = true;
-    publish_discovery_entity(&s);
-
-    memset(&s, 0, sizeof(s));
     s.component = "binary_sensor"; s.object_id = "update_available"; s.name = "Update Available";
     s.device_class = "update"; s.icon = "mdi:cloud-download-outline"; s.has_state = true;
     publish_discovery_entity(&s);
 
     publish_update_discovery();
+    unpublish_removed_entities();
 
     ESP_LOGI(TAG, "Published Home Assistant MQTT Discovery config for all entities");
 }
@@ -497,7 +510,6 @@ void mqtt_service_publish_state(void) {
     snprintf(buf, sizeof(buf), "%u", (unsigned)(esp_get_free_heap_size() / 1024));
     publish_state_str("sensor", "free_heap", buf);
 
-    publish_state_str("switch", "auto_update", wifi_mgr_get_auto_update_enabled() ? "ON" : "OFF");
     publish_state_str("binary_sensor", "update_available", ota_update_is_available() ? "ON" : "OFF");
     publish_update_state();
 }
@@ -581,8 +593,6 @@ static void handle_command(const char *topic, const char *payload) {
         ESP_LOGI(TAG, "Restart command received via MQTT/Home Assistant");
         xTaskCreate(restart_task, "mqtt_restart", 2048, (void *)(uintptr_t)1000, 5, NULL);
         return;
-    } else if (topic_is(topic, "switch", "auto_update")) {
-        wifi_mgr_set_auto_update_en(strcmp(payload, "ON") == 0);
     } else if (topic_is(topic, "update", "firmware")) {
         ESP_LOGI(TAG, "Firmware install command received via MQTT/Home Assistant");
         ota_update_install_now();
@@ -602,7 +612,7 @@ static void subscribe_all_commands(void) {
         {"switch", "gnd"}, {"switch", "map"}, {"switch", "squawk_alert"}, {"switch", "apts"},
         {"switch", "apt_commercial"}, {"switch", "apt_military"}, {"switch", "apt_aeroclubs"},
         {"select", "trail_length"}, {"select", "language"}, {"button", "restart"},
-        {"switch", "auto_update"}, {"update", "firmware"},
+        {"update", "firmware"},
     };
     for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
         char topic[MQTT_TOPIC_MAX_LEN];
