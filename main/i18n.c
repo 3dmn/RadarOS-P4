@@ -133,6 +133,8 @@ static const char *s_strings[LANG_COUNT][STR_COUNT] = {
         [STR_WEB_FWUPD_DOWNLOAD_BTN_SUFFIX] = " (.bin)",
         [STR_WEB_FWUPD_DOWNLOAD_HINT]       = "Download the .bin file to your computer/phone, then upload it in the \"Firmware Update (OTA)\" section above.",
         [STR_FW_UPDATE_TOAST_FMT]   = "New firmware version %s available!",
+        [STR_MAP_LOADING_FMT]       = "DOWNLOADING MAP (%d/%d)...",
+        [STR_ADSB_LOADING]          = "FETCHING AIRCRAFT...",
     },
     [LANG_PL] = {
         [STR_FETCHING_PHOTO]    = "POBIERANIE ZDJECIA...",
@@ -261,6 +263,8 @@ static const char *s_strings[LANG_COUNT][STR_COUNT] = {
         [STR_WEB_FWUPD_DOWNLOAD_BTN_SUFFIX] = " (.bin)",
         [STR_WEB_FWUPD_DOWNLOAD_HINT]       = "Pobierz plik .bin na komputer/telefon, a nastepnie wgraj go w sekcji \"Aktualizacja oprogramowania (OTA)\" powyzej.",
         [STR_FW_UPDATE_TOAST_FMT]   = "Dostepna nowa wersja firmware %s!",
+        [STR_MAP_LOADING_FMT]       = "POBIERANIE MAPY (%d/%d)...",
+        [STR_ADSB_LOADING]          = "POBIERANIE SAMOLOTOW...",
     },
 };
 

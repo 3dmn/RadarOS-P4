@@ -32,6 +32,12 @@ bool map_tile_service_is_enabled(void);
 // background itself is rendered at. -1 if no reload has completed yet.
 int map_tile_service_get_current_zoom(void);
 
+// True while a tile grid reload is actively fetching (from the start of a
+// reload until the last tile attempt finishes) - lets adsb_service.c skip
+// its own polling while the map download owns the shared HTTPS mutex/SDIO
+// bandwidth. See radar_ui_show_map_loading() for the matching status bubble.
+bool map_tile_is_downloading(void);
+
 // Suspends/resumes tile fetching (the worker task keeps running, it just
 // skips fetching and sleeps) - used by ota_update_service.c to keep this
 // task off the network entirely while esp_https_ota() is streaming/

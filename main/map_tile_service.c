@@ -22,6 +22,8 @@
 #include "aircraft_types.h"
 #include "wifi_manager.h"
 #include "map_tile_service.h"
+#include "adsb_service.h"
+#include "radar_ui.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -57,6 +59,10 @@ static volatile uint32_t s_generation = 0;
 // the very first reload always counts as a zoom change. volatile: read
 // from other tasks via map_tile_service_get_current_zoom().
 static volatile int s_current_zoom = -1;
+// True for the duration of an active tile grid fetch - see
+// map_tile_is_downloading() and the sequential map-then-ADS-B fetch in
+// process_reload() below.
+static volatile bool s_is_downloading = false;
 
 // Standard Slippy Map (Web Mercator) projection. tile_y grows southward -
 // a more northern latitude (larger lat_deg) always yields a *smaller*
@@ -237,6 +243,19 @@ static void process_reload(float lat, float lon, float range_km, uint32_t my_gen
         }
     }
 
+    int total_tiles = (tx_max - tx_min + 1) * (ty_max - ty_min + 1);
+    int tile_count = 0;
+
+    // Sequential map-tiles-then-ADS-B fetch: pause adsb_service.c's polling
+    // for the whole grid download (it shares g_https_mutex, so interleaving
+    // the two just adds pointless TLS handshake contention) and show a
+    // progress bubble instead of two silent fetches racing each other. See
+    // the completion handling below for how adsb_service.c is handed back
+    // control.
+    s_is_downloading = true;
+    adsb_service_pause();
+    radar_ui_show_map_loading(0, total_tiles);
+
     for (int ty = ty_min; ty <= ty_max; ty++) {
         if (s_paused) {
             ESP_LOGW(TAG, "Tile reload aborted: OTA update in progress");
@@ -251,6 +270,8 @@ static void process_reload(float lat, float lon, float range_km, uint32_t my_gen
         for (int tx_raw = tx_min; tx_raw <= tx_max; tx_raw++) {
             if (s_paused) break;
             if (my_generation != s_generation) break;
+            tile_count++;
+            radar_ui_update_map_loading(tile_count, total_tiles);
             int tx = ((tx_raw % n) + n) % n;
             char url[96];
             snprintf(url, sizeof(url), "https://tile.openstreetmap.org/%d/%d/%d.png", zoom, tx, ty);
@@ -320,12 +341,38 @@ static void process_reload(float lat, float lon, float range_km, uint32_t my_gen
         }
     }
 
+    s_is_downloading = false;
+
     if (my_generation != s_generation) {
         // Superseded mid-reload - the canvas holds a partial/stale grid;
-        // skip the redraw, the newer generation's process_reload() call
-        // will overwrite it and invalidate the canvas itself.
+        // skip the redraw, and leave adsb_service.c paused and the loading
+        // bubble as-is, since the newer generation's process_reload() call
+        // already re-armed both (it called adsb_service_pause() and
+        // radar_ui_show_map_loading() again at its own start) and will run
+        // this same completion sequence itself once it finishes.
         return;
     }
+
+    if (s_paused) {
+        // Aborted by ota_update_service.c, not superseded - it manages
+        // adsb_service.c's pause/resume itself while flashing, so leave
+        // that alone here. Just clear the now-stuck "downloading map"
+        // bubble instead of leaving it on screen for the OTA's duration.
+        radar_ui_hide_loading();
+        if (s_canvas) {
+            bsp_display_lock(0);
+            lv_obj_invalidate(s_canvas);
+            bsp_display_unlock();
+        }
+        return;
+    }
+
+    // Tile grid finished normally - hand off to adsb_service.c for the
+    // first (immediate) ADS-B fetch. It hides the bubble itself once that
+    // fetch succeeds and radar_ui_refresh() has run - see adsb_worker_task().
+    radar_ui_show_adsb_loading();
+    adsb_service_resume();
+    adsb_service_request_immediate_fetch();
 
     if (s_canvas) {
         bsp_display_lock(0);
@@ -415,6 +462,10 @@ bool map_tile_service_is_enabled(void) {
 
 int map_tile_service_get_current_zoom(void) {
     return s_current_zoom;
+}
+
+bool map_tile_is_downloading(void) {
+    return s_is_downloading;
 }
 
 void map_tile_service_pause(void) {

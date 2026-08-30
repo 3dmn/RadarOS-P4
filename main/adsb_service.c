@@ -19,6 +19,7 @@
 #include "adsb_service.h"
 #include "wifi_manager.h"
 #include "radar_ui.h"
+#include "map_tile_service.h"
 
 static const char *TAG = "ADSB_SVC";
 
@@ -370,15 +371,30 @@ void adsb_service_unlock(void) {
 }
 
 static volatile bool s_adsb_paused = false;
+static TaskHandle_t s_adsb_task_handle = NULL;
+// Set by adsb_service_request_immediate_fetch() - the next successful fetch
+// hides the map/ADS-B loading bubble (radar_ui_hide_loading()) and clears
+// this, so a normal periodic fetch never touches the bubble.
+static volatile bool s_first_fetch_pending = false;
 
 void adsb_service_pause(void) {
     s_adsb_paused = true;
-    ESP_LOGI(TAG, "ADS-B polling paused (OTA update in progress)");
+    // Currently only called by map_tile_service.c's sequential map-then-
+    // ADS-B fetch (see process_reload()) - update this text if a second
+    // caller with a different reason (e.g. an OTA update) is wired up.
+    ESP_LOGI(TAG, "ADS-B polling paused (map tile download in progress)");
 }
 
 void adsb_service_resume(void) {
     s_adsb_paused = false;
     ESP_LOGI(TAG, "ADS-B polling resumed");
+}
+
+void adsb_service_request_immediate_fetch(void) {
+    s_first_fetch_pending = true;
+    if (s_adsb_task_handle) {
+        xTaskNotifyGive(s_adsb_task_handle);
+    }
 }
 
 static void adsb_worker_task(void *pvParameters) {
@@ -436,8 +452,12 @@ static void adsb_worker_task(void *pvParameters) {
     esp_http_client_set_header(client, "Accept", "application/json");
 
     while (1) {
-        if (s_adsb_paused) {
-            vTaskDelay(pdMS_TO_TICKS(500));
+        if (s_adsb_paused || map_tile_is_downloading()) {
+            // Blocks until either the 500 ms poll expires, or
+            // adsb_service_request_immediate_fetch() wakes us the instant
+            // map_tile_service.c's sequential map fetch finishes and calls
+            // adsb_service_resume().
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
             continue;
         }
 
@@ -497,6 +517,11 @@ static void adsb_worker_task(void *pvParameters) {
                 ESP_LOGI(TAG, "Fetched %d aircraft from %s", parsed, url);
 
                 radar_ui_refresh();
+
+                if (s_first_fetch_pending) {
+                    s_first_fetch_pending = false;
+                    radar_ui_hide_loading();
+                }
             }
         } else {
             // Any non-200 response, transport error, or suspiciously short
@@ -535,5 +560,5 @@ void adsb_service_start(void) {
     // sdkconfig.defaults), FreeRTOS places this in external PSRAM instead of
     // the internal DMA-capable SRAM the Wi-Fi SDIO driver needs, so this
     // task's stack never competes with it.
-    xTaskCreatePinnedToCore(adsb_worker_task, "adsb_worker", 16384, NULL, 3, NULL, 1);
+    xTaskCreatePinnedToCore(adsb_worker_task, "adsb_worker", 16384, NULL, 3, &s_adsb_task_handle, 1);
 }

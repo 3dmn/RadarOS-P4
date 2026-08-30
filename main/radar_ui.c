@@ -197,6 +197,22 @@ static lv_timer_t *mqtt_card_hide_timer = NULL;
 static bool mqtt_card_ready = false;
 static mqtt_notify_state_t s_mqtt_notify_state = MQTT_NOTIFY_NONE;
 
+// Modal status bubble for the sequential map-tiles -> ADS-B startup/RNG-
+// change fetch (see map_tile_service.c/adsb_service.c) - single-label twin
+// of wifi_card/mqtt_card above, same visual style.
+typedef enum {
+    LOADING_NOTIFY_NONE = 0,
+    LOADING_NOTIFY_MAP,
+    LOADING_NOTIFY_ADSB,
+} loading_notify_state_t;
+
+static lv_obj_t *loading_card;
+static lv_obj_t *loading_card_label;
+static bool loading_card_ready = false;
+static loading_notify_state_t s_loading_state = LOADING_NOTIFY_NONE;
+static int s_loading_map_current = 0;
+static int s_loading_map_total = 0;
+
 // HUD status badge (bottom-left of radar_area) - compact, persistent LED
 // indicators for Wi-Fi and (when enabled) MQTT connection health.
 static lv_obj_t *status_badge;
@@ -1096,6 +1112,47 @@ void radar_ui_mqtt_notify_error(void) {
     apply_mqtt_card();
 }
 
+static void apply_loading_card(void) {
+    if (!loading_card_ready) return;
+
+    bsp_display_lock(0);
+    switch (s_loading_state) {
+        case LOADING_NOTIFY_MAP:
+            lv_label_set_text_fmt(loading_card_label, T(STR_MAP_LOADING_FMT), s_loading_map_current, s_loading_map_total);
+            lv_obj_clear_flag(loading_card, LV_OBJ_FLAG_HIDDEN);
+            break;
+        case LOADING_NOTIFY_ADSB:
+            lv_label_set_text(loading_card_label, T(STR_ADSB_LOADING));
+            lv_obj_clear_flag(loading_card, LV_OBJ_FLAG_HIDDEN);
+            break;
+        default:
+            lv_obj_add_flag(loading_card, LV_OBJ_FLAG_HIDDEN);
+            break;
+    }
+    bsp_display_unlock();
+}
+
+void radar_ui_show_map_loading(int current, int total) {
+    s_loading_state = LOADING_NOTIFY_MAP;
+    s_loading_map_current = current;
+    s_loading_map_total = total;
+    apply_loading_card();
+}
+
+void radar_ui_update_map_loading(int current, int total) {
+    radar_ui_show_map_loading(current, total);
+}
+
+void radar_ui_show_adsb_loading(void) {
+    s_loading_state = LOADING_NOTIFY_ADSB;
+    apply_loading_card();
+}
+
+void radar_ui_hide_loading(void) {
+    s_loading_state = LOADING_NOTIFY_NONE;
+    apply_loading_card();
+}
+
 // Opacity-pulse animation shared by both status LEDs - breathing/blinking
 // speed and range vary by connection state (see set_led_indicator() below).
 static void led_pulse_anim_cb(void *var, int32_t val) {
@@ -1774,12 +1831,40 @@ void radar_ui_build(void) {
     lv_obj_set_style_text_align(mqtt_card_body, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(mqtt_card_body, "");
 
+    // Map/ADS-B sequential-fetch loading bubble - single-label twin of
+    // wifi_card/mqtt_card above, same visual style. Docked near the top
+    // (just below the top_bar button row) instead of screen center, so it
+    // never overlaps the centered Wi-Fi/MQTT connection cards.
+    loading_card = lv_obj_create(scr);
+    lv_obj_set_width(loading_card, 380);
+    lv_obj_set_height(loading_card, LV_SIZE_CONTENT);
+    lv_obj_align(loading_card, LV_ALIGN_TOP_MID, 0, 42);
+    lv_obj_set_style_bg_color(loading_card, lv_color_hex(0x0a0f1d), 0);
+    lv_obj_set_style_bg_opa(loading_card, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(loading_card, lv_color_hex(0x00e676), 0);
+    lv_obj_set_style_border_width(loading_card, 2, 0);
+    lv_obj_set_style_radius(loading_card, 12, 0);
+    lv_obj_set_style_pad_all(loading_card, 16, 0);
+    lv_obj_set_style_shadow_width(loading_card, 20, 0);
+    lv_obj_set_style_shadow_color(loading_card, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_opa(loading_card, LV_OPA_50, 0);
+    lv_obj_clear_flag(loading_card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(loading_card, LV_OBJ_FLAG_HIDDEN);
+
+    loading_card_label = lv_label_create(loading_card);
+    lv_obj_set_style_text_font(loading_card_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(loading_card_label, lv_color_hex(0x00ff88), 0);
+    lv_obj_set_style_text_align(loading_card_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(loading_card_label, "");
+
     bsp_display_unlock();
 
     wifi_card_ready = true;
     apply_wifi_card();
     mqtt_card_ready = true;
     apply_mqtt_card();
+    loading_card_ready = true;
+    apply_loading_card();
     status_badge_ready = true;
     apply_status_badge();
 

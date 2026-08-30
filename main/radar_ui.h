@@ -104,6 +104,26 @@ void radar_ui_mqtt_notify_connected(void);
 // state).
 void radar_ui_mqtt_notify_error(void);
 
+// ================= MAP/ADS-B LOADING NOTIFICATION =================
+// Modal status bubble for the sequential startup/RNG-change fetch (map
+// tiles first, then ADS-B - see map_tile_service.c/adsb_service.c), styled
+// like the Wi-Fi/MQTT cards above. Safe to call from any task, including
+// before radar_ui_build() has run (the state is cached and applied once the
+// card widget exists). Each call locks/unlocks internally.
+
+// Shows the bubble with a tile download counter.
+void radar_ui_show_map_loading(int current, int total);
+
+// Updates the counter on an already-shown map-loading bubble.
+void radar_ui_update_map_loading(int current, int total);
+
+// Switches the bubble to the "fetching aircraft" message once the tile
+// download finishes.
+void radar_ui_show_adsb_loading(void);
+
+// Hides the bubble (map tiles and/or ADS-B fetch both finished).
+void radar_ui_hide_loading(void);
+
 // ================= HUD STATUS BADGE =================
 // Compact, persistent badge in the bottom-left corner of radar_area showing
 // small colored LEDs for Wi-Fi (always) and MQTT (only while enabled).
