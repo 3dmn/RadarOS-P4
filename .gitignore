@@ -23,3 +23,7 @@ CLAUDE.md
 # Pliki systemowe
 Thumbs.db
 .DS_Store
+# Ignore root debug images
+/*.png
+/*.jpg
+/*.jpeg
