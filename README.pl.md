@@ -35,16 +35,16 @@ RadarOS-P4 zamienia moduł **ESP32-P4** z **7-calowym ekranem dotykowym MIPI-DSI
 ## Kluczowe funkcje
 
 - **Śledzenie ruchu ADS-B na żywo** — dane w czasie rzeczywistym z [adsb.fi](https://adsb.fi) i [airplanes.live](https://airplanes.live), z **dynamicznym promieniem zapytania**: odległość zapytania (w milach morskich) jest wyliczana z aktualnie wybranego zasięgu HUD (np. 50 km → 27 NM, 100 km → 54 NM, 400 km → 216 NM) zamiast stałego, maksymalnego promienia — dzięki temu odpowiedzi API pozostają małe i szybkie nawet nad gęstymi aglomeracjami.
-- **Interaktywny HUD na 7-calowym ekranie dotykowym (LVGL 9.5)** — wektorowe renderowanie w 60 FPS z okręgami zasięgu, kompasem namiarowym, ikonami statków/śmigłowców zorientowanymi wg kursu, stałą kapsułą statusu w lewym dolnym rogu (Wi-Fi, MQTT oraz pulsująca bursztynowa dioda **● FW** sygnalizująca dostępną aktualizację) i przyciemnioną mapą OpenStreetMap renderowaną do bufora w pamięci PSRAM.
+- **Interaktywny HUD na 7-calowym ekranie dotykowym (LVGL 9.5)** — wektorowe renderowanie w 60 FPS z okręgami zasięgu, kompasem namiarowym, ikonami statków/śmigłowców zorientowanymi wg kursu, stałą kapsułą statusu w lewym dolnym rogu (Wi-Fi, MQTT oraz pulsująca bursztynowa dioda **● FW** sygnalizująca dostępną aktualizację) i przyciemnioną mapą OpenStreetMap renderowaną do bufora w pamięci PSRAM. Pięć przycisków dotykowych u góry (**APTS**, **AIR**, **GND**, **MAP**, **RNG**) przełącza wprost na ekranie warstwę lotnisk, filtr ruchu, ruch naziemny, mapę w tle i zasięg radaru — zmiany odzwierciedlane są na żywo w panelu web i Home Assistant.
 - **Home Assistant i MQTT Discovery** — pełna autokonfiguracja po połączeniu: **25 encji** (sterujące, sensory oraz dedykowana encja `update` z opisem zmian) pojawiają się pod jedną kartą urządzenia, bez pisania YAML. Zobacz [poniżej](#integracja-home-assistant--mqtt).
 - **Panel zarządzania WWW** — responsywny, pięciozakładkowy interfejs w stylu kokpitu, eksport/import konfiguracji do JSON, zapamiętywanie otwartej zakładki po odświeżeniu strony (hash w adresie URL + `localStorage`) oraz wbudowany mechanizm sprawdzania wydań na GitHubie z bezpośrednim linkiem do pobrania.
 - **Dwujęzyczny interfejs (i18n)** — każdy tekst na ekranie i w panelu WWW dostępny jest w języku **angielskim** i **polskim**, przełączanym na żywo z ekranu dotykowego, panelu WWW lub Home Assistant.
 - **Zoptymalizowana architektura pamięci** — 32 MB zewnętrznej pamięci PSRAM przechowuje bufor odpowiedzi ADS-B, bufor mapy kafelkowej oraz (dzięki `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`/`CONFIG_MBEDTLS_DYNAMIC_BUFFER`) bufory sesji mbedTLS, pozostawiając wewnętrzną pamięć SRAM z dostępem DMA wyłącznie dla sterownika Wi-Fi ESP-Hosted. Dodatkowy globalny mutex gwarantuje, że w danej chwili otwarta jest tylko jedna sesja HTTPS/TLS — dla odpytywania ADS-B, kafelków mapy i sprawdzania wersji — co eliminuje awarie pamięci `sdio_rx_get_buffer` powodowane wcześniej przez równoległe sesje TLS.
 - **Globalna skategoryzowana baza lotnisk** — setki lotnisk na całym świecie podzielonych na **komunikacyjne (Commercial Hubs)**, **bazy wojskowe (Military Air Bases)** oraz **aerokluby i lądowiska (General Aviation)**, każda kategoria niezależnie przełączalna i renderowana wyłącznie w aktywnym zasięgu radaru.
 - **Alarmy squawk awaryjnych** — natychmiastowy, pulsujący baner na całą szerokość HUD-u przy kodach transpondera **7700** (Emergency), **7600** (Awaria radia) i **7500** (Porwanie).
-- **Bogata telemetria celów** — sanityzowane callsigny, automatyczne oznaczanie `[MIL]` ruchu wojskowego NATO/sojuszniczego, strzałki trendu wysokości (▲/▼), prędkość względem ziemi, kurs oraz kolorowane ślady lotu o konfigurowalnej długości historii.
+- **Bogata telemetria celów** — sanityzowane callsigny, automatyczne oznaczanie `[MIL]` ruchu wojskowego NATO/sojuszniczego, strzałki trendu wysokości (▲/▼), prędkość względem ziemi, kurs oraz kolorowane ślady lotu.
 - **Priorytet wojskowy** — opcjonalny (domyślnie **włączony**, przełączany z panelu web lub Home Assistant): maszyny wojskowe/NATO są zawsze sortowane na górę listy bocznej, a po osiągnięciu limitu śledzonych celów najpierw usuwany jest najdalszy cel cywilny — maszyna wojskowa jest usuwana dopiero, gdy sam ruch wojskowy przekroczy limit.
-- **Interaktywne okienka statków i 3-stopniowy silnik zdjęć** — dotknięcie dowolnego celu pokazuje pełne parametry lotu wraz z prawdziwym zdjęciem egzemplarza (Planespotters / Airport-Data) lub zdjęciem poglądowym z Wikipedii dla danego typu.
+- **Konfigurowalna akcja dotknięcia (3 tryby)** — ustawiana z panelu web lub Home Assistant (**Akcja po kliknięciu samolotu**): **Details & Photo** (domyślnie) otwiera okienko z pełnymi parametrami lotu i prawdziwym zdjęciem egzemplarza (Planespotters / Airport-Data) lub zdjęciem poglądowym z Wikipedii dla danego typu; **Flight Trace** zamiast tego rysuje faktycznie przeleciany ślad wybranego samolotu jako kolorową linię, pobieraną na żywo z historii trasy adsb.fi/airplanes.live (z debounce'em, przycinaną do 120 punktów) i czyszczoną po odznaczeniu; **Disabled** ignoruje dotknięcia.
 
 ## Sprzęt
 
@@ -101,7 +101,7 @@ RadarOS-P4 korzysta z lekkiego mechanizmu **wyłącznie powiadomień** — urzą
 
 | Zakładka | Zawartość |
 |---|---|
-| **Radar i wyświetlacz** | Jasność ekranu, domyślny zasięg, limit celów, filtr ruchu (ALL/CIVIL/MIL), priorytet wojskowy (sortowanie listy + ochrona przed usunięciem), ruch naziemny, mapa w tle, baner alarmu squawk, warstwa lotnisk + przełączniki per kategoria (Komercyjne/Wojskowe/Aerokluby), długość śladu lotu, akcja po kliknięciu samolotu (Wyłączona/Szczegóły i zdjęcie/Ślad lotu). |
+| **Radar i wyświetlacz** | Jasność ekranu, domyślny zasięg, limit celów, filtr ruchu (ALL/CIVIL/MIL), priorytet wojskowy (sortowanie listy + ochrona przed usunięciem), ruch naziemny, mapa w tle, baner alarmu squawk, warstwa lotnisk + przełączniki per kategoria (Komercyjne/Wojskowe/Aerokluby), akcja po kliknięciu samolotu (Wyłączona/Szczegóły i zdjęcie/Ślad lotu). |
 | **Lokalizacja** | Szerokość/długość geograficzna stacji z interaktywnym kwadratowym (1:1) selektorem mapy. |
 | **Sieć Wi-Fi** | SSID/hasło, skaner sieci, aktualny status połączenia i adres IP. |
 | **System** | Język (English/Polski), nazwa stacji, wersja firmware, kopia zapasowa/przywracanie konfiguracji JSON, ręczne wgrywanie pliku w sekcji **Firmware Update (OTA)** oraz sekcja **Firmware Update Check** (adres URL sprawdzania wersji, przycisk Check for Updates Now, link do pobrania z GitHuba). |
@@ -128,7 +128,6 @@ Włącz MQTT w zakładce **MQTT**, wskaż swojego brokera, a RadarOS-P4 opubliku
 | Priorytet wojskowy | `switch` | Wł. / Wył. |
 | Warstwa lotnisk | `switch` | Wł. / Wył. |
 | Lotniska komercyjne / wojskowe / aerokluby | `switch` ×3 | Wł. / Wył. per kategoria |
-| Długość śladu lotu | `select` | Short / Medium / Long / Maximum |
 | Akcja po kliknięciu samolotu | `select` | Disabled / Details & Photo / Flight Trace |
 | Język interfejsu | `select` | English / Polski |
 | Restart urządzenia | `button` | Restartuje ESP32-P4 |

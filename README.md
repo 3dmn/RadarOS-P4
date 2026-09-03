@@ -34,16 +34,16 @@ RadarOS-P4 turns an **ESP32-P4** with a **7" MIPI-DSI touchscreen (1024×600)** 
 ## Key Features
 
 - **Live ADS-B Tracking** — real-time feed from [adsb.fi](https://adsb.fi) and [airplanes.live](https://airplanes.live), with a **dynamic query radius**: the request distance (in nautical miles) is derived from the HUD's currently selected range (e.g. 50 km → 27 NM, 100 km → 54 NM, 400 km → 216 NM) instead of a fixed worst-case radius, keeping API responses small and fast even over dense metro airspace.
-- **Interactive 7" Touch HUD (LVGL 9.5)** — 60 FPS vector rendering with concentric range rings, bearing compass, heading-oriented aircraft/helicopter icons, a persistent bottom-left status capsule (Wi-Fi, MQTT, and a pulsing amber **● FW** firmware-update indicator), and a darkened OpenStreetMap tile background rendered into a PSRAM canvas.
+- **Interactive 7" Touch HUD (LVGL 9.5)** — 60 FPS vector rendering with concentric range rings, bearing compass, heading-oriented aircraft/helicopter icons, a persistent bottom-left status capsule (Wi-Fi, MQTT, and a pulsing amber **● FW** firmware-update indicator), and a darkened OpenStreetMap tile background rendered into a PSRAM canvas. Five top-bar tap targets (**APTS**, **AIR**, **GND**, **MAP**, **RNG**) cycle the airport layer, traffic filter, ground traffic, background map, and radar range directly on the glass, mirrored live to the web panel and Home Assistant.
 - **Home Assistant & MQTT Discovery** — full auto-discovery on connect: **25 entities** (controls, sensors, and a dedicated `update` entity with changelog) appear under one device card with zero YAML. See [below](#home-assistant--mqtt-integration).
 - **Web Management Panel** — five-tab responsive dark/neon cockpit UI, JSON configuration export/import, a tab selection that survives a page refresh (URL hash + `localStorage`), and a built-in GitHub release checker with a one-tap download link.
 - **Dual-Language UI (i18n)** — every on-screen and web-panel string is available in **English** and **Polski**, switchable live from the touchscreen, the web panel, or Home Assistant.
 - **Optimized Memory Architecture** — the 32 MB external PSRAM hosts the ADS-B response buffer, the map tile canvas, and (via `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`/`CONFIG_MBEDTLS_DYNAMIC_BUFFER`) the mbedTLS session buffers, leaving the internal DMA-capable SRAM free for the ESP-Hosted Wi-Fi/SDIO driver. A global mutex further guarantees only one HTTPS/TLS session is ever open at a time across ADS-B polling, map tiles, and version checks, eliminating the `sdio_rx_get_buffer` memory crashes that concurrent TLS sessions used to cause.
 - **Global Categorized Airport Database** — hundreds of airports worldwide split into **Commercial Hubs**, **Military Air Bases**, and **General Aviation & Aeroclubs**, each independently toggleable and rendered only within the active radar range.
 - **Emergency Squawk Alerts** — instant, pulsing full-width HUD banner on transponder codes **7700** (Emergency), **7600** (Radio Failure), and **7500** (Hijack).
-- **Rich Target Telemetry** — sanitized callsigns, automatic `[MIL]` tagging for NATO/allied military traffic, altitude trend arrows (▲/▼), ground speed, heading, and colored flight trails with configurable history length.
+- **Rich Target Telemetry** — sanitized callsigns, automatic `[MIL]` tagging for NATO/allied military traffic, altitude trend arrows (▲/▼), ground speed, heading, and colored flight trails.
 - **Military Priority** — optional (default **on**, toggleable from the web panel or Home Assistant): military/NATO contacts are always sorted to the top of the sidebar list, and when the tracked-aircraft limit is reached, the farthest civilian target is evicted first — a military contact is only ever dropped once military traffic alone exceeds the limit.
-- **Interactive Aircraft Popups & 3-Tier Photo Engine** — tap any target for full flight parameters plus a real airframe photo (Planespotters / Airport-Data) or a Wikipedia type-fallback image.
+- **Configurable Tap Action (3 modes)** — set via web panel or Home Assistant (**Aircraft Click Action**): **Details & Photo** (default) opens a popup with full flight parameters plus a real airframe photo (Planespotters / Airport-Data) or a Wikipedia type-fallback image; **Flight Trace** instead draws the selected aircraft's actual flown path as a colored trail, fetched live from adsb.fi/airplanes.live's track history (debounced, downsampled to 120 points) and cleared on deselect; **Disabled** ignores taps entirely.
 
 ## Hardware Requirements
 
@@ -117,7 +117,7 @@ RadarOS-P4 uses a lightweight **notification-only** update mechanism — the dev
 
 | Tab | Contents |
 |---|---|
-| **Radar & Display** | Brightness, default range, max aircraft, traffic filter (ALL/CIVIL/MIL), military priority (list sort + eviction protection), ground traffic, background map, emergency squawk banner, airport layer + per-category toggles (Commercial/Military/Aeroclubs), flight trail length, aircraft click action (Disabled/Details & Photo/Flight Trace). |
+| **Radar & Display** | Brightness, default range, max aircraft, traffic filter (ALL/CIVIL/MIL), military priority (list sort + eviction protection), ground traffic, background map, emergency squawk banner, airport layer + per-category toggles (Commercial/Military/Aeroclubs), aircraft click action (Disabled/Details & Photo/Flight Trace). |
 | **Location** | Station latitude/longitude with an interactive square (1:1) map picker. |
 | **Wi-Fi & Network** | SSID/password, network scanner, live connection status and IP address. |
 | **System** | Language (English/Polski), station name, firmware version, JSON configuration backup/restore, manual **Firmware Update (OTA)** file upload, and the **Firmware Update Check** section (version check URL, Check for Updates Now, GitHub download link). |
@@ -144,7 +144,6 @@ Enable MQTT on the **MQTT** tab, point it at your broker, and RadarOS-P4 publish
 | Military Priority | `switch` | On / Off |
 | Airports Layer | `switch` | On / Off |
 | Commercial / Military / Aeroclub Airports | `switch` ×3 | On / Off per category |
-| Flight Trail Length | `select` | Short / Medium / Long / Maximum |
 | Aircraft Click Action | `select` | Disabled / Details & Photo / Flight Trace |
 | Interface Language | `select` | English / Polski |
 | Restart Device | `button` | Reboots the ESP32-P4 |
