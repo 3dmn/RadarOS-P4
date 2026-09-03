@@ -4,7 +4,6 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
 
 #include "esp_log.h"
 #include "esp_http_client.h"
@@ -15,11 +14,16 @@
 #include "ota_update_service.h"
 #include "wifi_manager.h"
 #include "radar_ui.h"
+#include "map_tile_service.h"
+#include "net_lock.h"
 #include "version.h"
 
 static const char *TAG = "OTA_UPDATE";
 
-#define OTA_CHECK_FIRST_DELAY_MS  (20 * 1000)
+// Gives Wi-Fi/MQTT and an initial map tile grid download a safe head start
+// before the first version check ever competes for the network - see
+// net_lock.h.
+#define OTA_CHECK_FIRST_DELAY_MS  (40 * 1000)
 #define OTA_CHECK_INTERVAL_MS     (4UL * 60UL * 60UL * 1000UL)
 #define OTA_MANIFEST_BUF_SIZE     4096
 #define OTA_HTTP_USER_AGENT       "RadarOS-P4-OTA/1.0"
@@ -73,10 +77,27 @@ static bool http_get_to_buffer(const char *url, uint8_t *buf, int buf_size, int 
     if (!client) return false;
     esp_http_client_set_header(client, "User-Agent", OTA_HTTP_USER_AGENT);
 
-    // g_https_mutex serializes this against adsb_service.c/map_tile_service.c
-    // TLS fetches - see the comment on g_https_mutex in wifi_manager.h.
+    // Defer entirely to an in-progress map tile grid download instead of
+    // just waiting on the global net_http_lock below - a periodic manifest
+    // check landing between two tile fetches (each already paced to let the
+    // SDIO driver recover) was enough to interleave an extra TLS session and
+    // exhaust its DMA buffer pool ("sdio_rx_get_buffer" assert). The version
+    // check is not time-critical (4h interval / manual "check now"), so
+    // blocking here until the grid finishes is preferable to racing it.
+    while (map_tile_is_downloading()) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    // net_http_lock() serializes this against every other esp_http_client
+    // session in the app - see net_lock.h. Cleanup happens before the lock
+    // is released, so the next waiter never opens its own session before
+    // this one's TLS resources are fully torn down.
     bool ok = false;
-    xSemaphoreTake(g_https_mutex, portMAX_DELAY);
+    if (!net_http_lock(portMAX_DELAY)) {
+        ESP_LOGE(TAG, "Failed to acquire the global HTTP/HTTPS network lock");
+        esp_http_client_cleanup(client);
+        return false;
+    }
     esp_err_t err = esp_http_client_open(client, 0);
     if (err == ESP_OK) {
         esp_http_client_fetch_headers(client);
@@ -97,8 +118,8 @@ static bool http_get_to_buffer(const char *url, uint8_t *buf, int buf_size, int 
     } else {
         ESP_LOGW(TAG, "Version manifest request failed: %s (%s)", esp_err_to_name(err), url);
     }
-    xSemaphoreGive(g_https_mutex);
     esp_http_client_cleanup(client);
+    net_http_unlock();
     return ok;
 }
 
@@ -181,7 +202,9 @@ void ota_update_service_start(void) {
     // git-describe build identifier (e.g. a commit hash) shown elsewhere in
     // the System tab, and would never semver-parse against a manifest.
     snprintf(s_installed_version, sizeof(s_installed_version), "%s", strip_v(FW_VERSION));
-    xTaskCreatePinnedToCore(ota_check_task, "ota_update", 8192, NULL, 2, NULL, 1);
+    // Pinned to core 0 (System & Network) - core 1 is reserved for LVGL/UI
+    // (see main.c).
+    xTaskCreatePinnedToCore(ota_check_task, "ota_update", 8192, NULL, 2, NULL, 0);
 }
 
 void ota_update_check_now(void) {

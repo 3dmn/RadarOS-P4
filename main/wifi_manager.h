@@ -3,9 +3,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-
 #include "i18n.h"
 #include "airports.h"
 
@@ -34,15 +31,6 @@ extern uint16_t g_mqtt_port;
 extern char g_mqtt_user[MQTT_USER_LEN];
 extern char g_mqtt_pass[MQTT_PASS_LEN];
 extern char g_mqtt_device_id[MQTT_DEVICE_ID_LEN];
-
-// Serializes every outbound HTTPS request across the app (ADS-B polling,
-// map tile fetches). Each mbedTLS handshake needs a sizable chunk of
-// internal (non-PSRAM) DMA-capable RAM; running several concurrently starves
-// the Wi-Fi SDIO driver's own DMA buffers and crashes with
-// "assert failed: sdio_rx_get_buffer". Created in wifi_manager_init() -
-// take it before opening a TLS connection (esp_http_client_open() /
-// esp_https_ota()) and give it back once the connection is closed.
-extern SemaphoreHandle_t g_https_mutex;
 
 // Initializes NVS, loads the saved configuration, tries to connect to Wi-Fi
 // in STA mode (with a timeout). On failure, starts the "RadarADSB-Setup"
@@ -105,15 +93,18 @@ void wifi_mgr_set_map_enabled(bool on);
 // effect immediately without a reboot.
 bool wifi_mgr_get_squawk_alert_enabled(void);
 void wifi_mgr_set_squawk_alert_enabled(bool on);
+bool wifi_mgr_get_mil_priority_enabled(void);
+void wifi_mgr_set_mil_priority_enabled(bool on);
 
-// Flight trail length (number of track-history points drawn behind an
-// aircraft) from NVS. 0 = trail disabled. Allowed values: 0/15/30/60/120.
-// The setter persists immediately (HUD/web/Home Assistant).
-uint8_t wifi_mgr_get_trail_len(void);
-void wifi_mgr_set_trail_len(uint8_t len);
+// Action performed when an aircraft is tapped/clicked, from NVS - see
+// aircraft_click_action_t in aircraft_types.h. The setter persists
+// immediately (HUD/web/Home Assistant).
+uint8_t wifi_mgr_get_click_action(void);
+void wifi_mgr_set_click_action(uint8_t action);
 
 // Maximum number of simultaneously parsed/displayed aircraft from NVS
-// (10-200; the hard hardware limit MAX_AIRCRAFT_CAPACITY is 200).
+// (10-100; the hard hardware buffer limit MAX_AIRCRAFT_CAPACITY, unrelated
+// to this user-facing ceiling, is still 200).
 uint16_t wifi_mgr_get_max_aircraft(void);
 void wifi_mgr_set_max_aircraft(uint16_t max_val);
 

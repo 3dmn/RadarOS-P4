@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <inttypes.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "esp_http_server.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
@@ -47,11 +49,12 @@
 #define HIDE_GROUND_DEFAULT     1
 #define MAP_ENABLED_DEFAULT     1
 #define SQUAWK_ALERT_DEFAULT    1
+#define MIL_PRIORITY_DEFAULT    1
 #define LANG_DEFAULT            0
-#define TRAIL_LEN_DEFAULT       30
+#define CLICK_ACTION_DEFAULT    AIRCRAFT_CLICK_DETAILS_PHOTO
 #define MAX_AIRCRAFT_DEFAULT    64
 #define MAX_AIRCRAFT_MIN        10
-#define MAX_AIRCRAFT_MAX        200
+#define MAX_AIRCRAFT_MAX        100
 #define MQTT_ENABLED_DEFAULT    0
 #define MQTT_PORT_DEFAULT       1883
 #define MQTT_HA_DISCOVERY_DEFAULT 1
@@ -64,6 +67,11 @@
 static const char *TAG = "WIFI_MGR";
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT      BIT0
+
+// Mirrors the wifi_status_t last pushed to the LCD UI (radar_ui_update_wifi_status)
+// so the web panel's /wifi_status endpoint can report live connection state
+// without re-deriving it from Wi-Fi event bits.
+static volatile wifi_status_t s_web_wifi_status = WIFI_STATUS_CONNECTING;
 
 static httpd_handle_t g_web_server = NULL;
 // Tracks whether esp_netif_create_default_wifi_sta() has already been
@@ -83,8 +91,9 @@ static uint8_t g_apt_filter_mask = APT_FILTER_MASK_DEFAULT;
 static uint8_t g_hide_ground = HIDE_GROUND_DEFAULT;
 static uint8_t g_map_enabled = MAP_ENABLED_DEFAULT;
 static uint8_t g_squawk_alert_enabled = SQUAWK_ALERT_DEFAULT;
+static uint8_t g_mil_priority_enabled = MIL_PRIORITY_DEFAULT;
 static uint8_t g_lang = LANG_DEFAULT;
-static uint8_t g_trail_len = TRAIL_LEN_DEFAULT;
+static uint8_t g_click_action = CLICK_ACTION_DEFAULT;
 static uint16_t g_max_aircraft = MAX_AIRCRAFT_DEFAULT;
 static uint8_t g_mqtt_enabled = MQTT_ENABLED_DEFAULT;
 static uint8_t g_mqtt_ha_discovery = MQTT_HA_DISCOVERY_DEFAULT;
@@ -93,10 +102,10 @@ uint16_t g_mqtt_port = MQTT_PORT_DEFAULT;
 char g_mqtt_user[MQTT_USER_LEN] = "";
 char g_mqtt_pass[MQTT_PASS_LEN] = "";
 char g_mqtt_device_id[MQTT_DEVICE_ID_LEN] = MQTT_DEVICE_ID_DEFAULT;
-SemaphoreHandle_t g_https_mutex = NULL;
 
-static bool is_valid_trail_len(uint8_t len) {
-    return len == 0 || len == 15 || len == 30 || len == 60 || len == 120;
+static bool is_valid_click_action(uint8_t action) {
+    return action == AIRCRAFT_CLICK_DISABLED || action == AIRCRAFT_CLICK_DETAILS_PHOTO ||
+           action == AIRCRAFT_CLICK_FLIGHT_TRACE;
 }
 
 // Radar range steps in km - must stay in sync with range_steps[] in
@@ -170,14 +179,18 @@ static void load_settings_from_nvs(void) {
     if (g_squawk_alert_enabled > 1) {
         g_squawk_alert_enabled = SQUAWK_ALERT_DEFAULT;
     }
+    nvs_get_u8(my_handle, "mil_prio", &g_mil_priority_enabled);
+    if (g_mil_priority_enabled > 1) {
+        g_mil_priority_enabled = MIL_PRIORITY_DEFAULT;
+    }
     nvs_get_u8(my_handle, "lang", &g_lang);
     if (g_lang > 1) {
         g_lang = LANG_DEFAULT;
     }
     i18n_set_lang((app_lang_t)g_lang);
-    nvs_get_u8(my_handle, "trail_len", &g_trail_len);
-    if (!is_valid_trail_len(g_trail_len)) {
-        g_trail_len = TRAIL_LEN_DEFAULT;
+    nvs_get_u8(my_handle, "click_act", &g_click_action);
+    if (!is_valid_click_action(g_click_action)) {
+        g_click_action = CLICK_ACTION_DEFAULT;
     }
     nvs_get_u16(my_handle, "max_aircraft", &g_max_aircraft);
     g_max_aircraft = clamp_max_aircraft(g_max_aircraft);
@@ -222,8 +235,9 @@ static void save_settings_to_nvs(void) {
     nvs_set_u8(my_handle, "hide_ground", g_hide_ground);
     nvs_set_u8(my_handle, "map_en", g_map_enabled);
     nvs_set_u8(my_handle, "sqk_alert", g_squawk_alert_enabled);
+    nvs_set_u8(my_handle, "mil_prio", g_mil_priority_enabled);
     nvs_set_u8(my_handle, "lang", g_lang);
-    nvs_set_u8(my_handle, "trail_len", g_trail_len);
+    nvs_set_u8(my_handle, "click_act", g_click_action);
     nvs_set_u16(my_handle, "max_aircraft", g_max_aircraft);
     nvs_set_u8(my_handle, "mqtt_en", g_mqtt_enabled);
     nvs_set_u8(my_handle, "mqtt_ha", g_mqtt_ha_discovery);
@@ -311,6 +325,15 @@ void wifi_mgr_set_squawk_alert_enabled(bool on) {
     save_settings_to_nvs();
 }
 
+bool wifi_mgr_get_mil_priority_enabled(void) {
+    return g_mil_priority_enabled == 1;
+}
+
+void wifi_mgr_set_mil_priority_enabled(bool on) {
+    g_mil_priority_enabled = on ? 1 : 0;
+    save_settings_to_nvs();
+}
+
 app_lang_t wifi_mgr_get_lang(void) {
     return (app_lang_t)g_lang;
 }
@@ -321,12 +344,12 @@ void wifi_mgr_set_lang(app_lang_t lang) {
     save_settings_to_nvs();
 }
 
-uint8_t wifi_mgr_get_trail_len(void) {
-    return g_trail_len;
+uint8_t wifi_mgr_get_click_action(void) {
+    return g_click_action;
 }
 
-void wifi_mgr_set_trail_len(uint8_t len) {
-    g_trail_len = is_valid_trail_len(len) ? len : TRAIL_LEN_DEFAULT;
+void wifi_mgr_set_click_action(uint8_t action) {
+    g_click_action = is_valid_click_action(action) ? action : CLICK_ACTION_DEFAULT;
     save_settings_to_nvs();
 }
 
@@ -402,6 +425,40 @@ static void hb_append(html_builder_t *hb, const char *fmt, ...) {
     if (hb->pos > hb->cap) hb->pos = hb->cap;
 }
 
+// Chunk size for httpd_send_buf_chunked() below - a compromise between the
+// 1024-2048 B range that keeps each individual TX allocation small and the
+// per-chunk overhead of the short yield between sends.
+#define HTTPD_CHUNK_SIZE 1536
+
+// Sends buf (len bytes) to the client in bounded HTTPD_CHUNK_SIZE pieces via
+// httpd_resp_send_chunk() instead of one large httpd_resp_send() call. A
+// single big send queues the whole response as a burst of DMA-capable TX
+// buffers to the ESP32-C6 over SDIO all at once, which was enough to
+// exhaust the shared internal-SRAM TX mempool ("STA TX mempool exhausted")
+// and reset the socket mid-response ("httpd_sock_err: error in send : 104",
+// ECONNRESET) while serving the web panel. The short yield between chunks
+// gives the SDIO/transport task time to actually flush each chunk and free
+// its DMA buffer before the next one is queued. httpd_resp_set_type()/
+// set_hdr() must still be called by the caller before the first chunk, same
+// as before a plain httpd_resp_send().
+static esp_err_t httpd_send_buf_chunked(httpd_req_t *req, const char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        size_t chunk_len = len - sent;
+        if (chunk_len > HTTPD_CHUNK_SIZE) chunk_len = HTTPD_CHUNK_SIZE;
+        esp_err_t err = httpd_resp_send_chunk(req, buf + sent, chunk_len);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "httpd_resp_send_chunk failed after %u/%u bytes: %s",
+                     (unsigned)sent, (unsigned)len, esp_err_to_name(err));
+            return err;
+        }
+        sent += chunk_len;
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    // Final zero-length chunk marks the end of the chunked response.
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 #define HTML_PAGE_BUF_SIZE (64 * 1024)
 
 // Current connection status (STA connected / AP-setup) and IP address of the
@@ -423,6 +480,28 @@ static void get_wifi_status_info(bool *out_sta_connected, char *ip_buf, size_t i
 static const char *strip_v_prefix(const char *s) {
     if (s && (s[0] == 'v' || s[0] == 'V') && s[1] != '\0') return s + 1;
     return s ? s : "";
+}
+
+// Formats an uptime duration (seconds) for the header pill's initial
+// server-rendered text - the JS timer (see formatUptime()'s uptimeSec
+// counter in the <script> block below) reformats it the same way on every
+// local tick, so both must agree: "Xm YYs" under 1h, "Xh YYm ZZs" under
+// 24h, "Xd YYh ZZm" from 24h up. The leftmost (largest) unit is left bare,
+// every unit after it is zero-padded to 2 digits (matching pad2() in JS),
+// so e.g. 63 seconds always reads as "1m 03s", never "0m 63s".
+static void format_uptime(int64_t uptime_sec, char *buf, size_t buf_len) {
+    int64_t d = uptime_sec / 86400;
+    int64_t h = (uptime_sec % 86400) / 3600;
+    int64_t m = (uptime_sec % 3600) / 60;
+    int64_t s = uptime_sec % 60;
+
+    if (d > 0) {
+        snprintf(buf, buf_len, "%" PRId64 "d %02" PRId64 "h %02" PRId64 "m", d, h, m);
+    } else if (h > 0) {
+        snprintf(buf, buf_len, "%" PRId64 "h %02" PRId64 "m %02" PRId64 "s", h, m, s);
+    } else {
+        snprintf(buf, buf_len, "%" PRId64 "m %02" PRId64 "s", m, s);
+    }
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req) {
@@ -456,6 +535,15 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
              FW_NAME, FW_VERSION, strip_v_prefix(app_desc->version), app_desc->idf_ver);
     char fw_footer[80];
     snprintf(fw_footer, sizeof(fw_footer), "%s %s (IDF %s)", FW_NAME, FW_VERSION, app_desc->idf_ver);
+
+    // Header uptime pill - server-rendered for the very first paint, then
+    // taken over by a client-side setInterval (see uptimeSec in <script>
+    // below) so the browser doesn't have to keep polling the device just to
+    // tick a clock.
+    int64_t uptime_sec = esp_timer_get_time() / 1000000ULL;
+    char uptime_str[32];
+    format_uptime(uptime_sec, uptime_str, sizeof(uptime_str));
+
     // A device without an STA connection serves the panel from its SoftAP
     // (setup mode) - in that state the user almost always came here to set
     // up Wi-Fi, so the default active tab is "Wi-Fi & Network" instead of
@@ -464,21 +552,36 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 
     const char *mqtt_status_label = T(STR_WEB_MQTT_STATUS_DISABLED);
     const char *mqtt_led_color = "#64748b";
+    const char *mqtt_dot_class = "dot-disabled";
     switch (mqtt_service_get_status()) {
         case MQTT_STATUS_CONNECTED:
             mqtt_status_label = T(STR_WEB_MQTT_STATUS_CONNECTED);
             mqtt_led_color = "#22c55e";
+            mqtt_dot_class = "dot-connected";
             break;
         case MQTT_STATUS_CONNECTING:
             mqtt_status_label = T(STR_WEB_MQTT_STATUS_CONNECTING);
             mqtt_led_color = "#eab308";
+            mqtt_dot_class = "dot-connecting";
             break;
         case MQTT_STATUS_ERROR:
             mqtt_status_label = T(STR_WEB_MQTT_STATUS_ERROR);
             mqtt_led_color = "#ef4444";
+            mqtt_dot_class = "dot-error";
             break;
         default:
             break;
+    }
+
+    // Same connected/connecting/error mapping as the LCD status LEDs
+    // (radar_ui.c set_led_indicator()) - used for the header status pill's
+    // initial render, before the JS poller (pollHeaderStatus()) takes over.
+    const char *wifi_dot_class;
+    switch (s_web_wifi_status) {
+        case WIFI_STATUS_CONNECTED: wifi_dot_class = "dot-connected";  break;
+        case WIFI_STATUS_ERROR:     wifi_dot_class = "dot-error";      break;
+        case WIFI_STATUS_CONNECTING:
+        default:                    wifi_dot_class = "dot-connecting"; break;
     }
 
     hb_append(&hb,
@@ -491,6 +594,22 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "body{background:#0a0f1d;color:#e6f7ee;font-family:-apple-system,system-ui,sans-serif;"
         "max-width:820px;width:94%%;margin:0 auto;padding:24px 16px;}"
         "h1{color:#00ff88;font-size:1.3em;text-align:center;margin-bottom:20px;}"
+        ".hdr{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px;}"
+        ".hdr h1{margin:0;text-align:left;flex:1;min-width:140px;}"
+        ".statuspills{display:flex;gap:8px;flex-shrink:0;}"
+        ".pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;"
+        "background:#161b22;border:1px solid #30363d;font-size:0.72em;font-weight:700;"
+        "letter-spacing:.04em;color:#8fb;white-space:nowrap;}"
+        ".pill-uptime{border-color:#145;color:#00ff88;}"
+        ".dot{width:8px;height:8px;border-radius:50%%;background:#64748b;flex-shrink:0;}"
+        "@keyframes pulse-connected{0%%,100%%{opacity:1;box-shadow:0 0 0 0 rgba(34,197,94,.55);}"
+        "50%%{opacity:.55;box-shadow:0 0 0 4px rgba(34,197,94,0);}}"
+        "@keyframes pulse-connecting{0%%,100%%{opacity:1;box-shadow:0 0 0 0 rgba(234,179,8,.6);}"
+        "50%%{opacity:.25;box-shadow:0 0 0 3px rgba(234,179,8,0);}}"
+        ".dot-connected{background:#22c55e;animation:pulse-connected 1.5s ease-in-out infinite;}"
+        ".dot-connecting{background:#eab308;animation:pulse-connecting 0.4s ease-in-out infinite;}"
+        ".dot-error{background:#ef4444;}"
+        ".dot-disabled{background:#64748b;}"
         ".card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:16px;}"
         ".card h2{margin:0;font-size:1em;color:#00ff88;}"
         ".tabbar{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-bottom:20px;}"
@@ -557,9 +676,14 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         ".progress-bar{height:100%%;width:0%%;background:#10b981;transition:width .2s;}"
         "p.hint{color:#8b949e;font-size:0.8em;margin-top:8px;}"
         "</style></head><body>"
-        "<h1>%s</h1>"
+        "<div class='hdr'><h1>%s</h1>"
+        "<div class='statuspills'>"
+        "<span class='pill pill-uptime'>\xE2\x8F\xB1 <span id='uptime-val'>%s</span></span>"
+        "<span class='pill'><span id='wifi-dot' class='dot %s'></span>WIFI</span>"
+        "<span class='pill'><span id='mqtt-hdr-dot' class='dot %s'></span>MQTT</span>"
+        "</div></div>"
         "<form id='cfgForm' onsubmit='return saveConfig(event)'>",
-        T(STR_WEB_PAGE_TITLE), T(STR_WEB_PAGE_TITLE));
+        T(STR_WEB_PAGE_TITLE), T(STR_WEB_PAGE_TITLE), uptime_str, wifi_dot_class, mqtt_dot_class);
 
     // Tab bar (top tabs) - view switching via plain JS
     // (element.style.display), see showTab() in <script> below.
@@ -599,11 +723,14 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 
     hb_append(&hb,
         "<div><label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label>"
-        "<input type=\"number\" name=\"max_aircraft\" min=\"10\" max=\"200\" value=\"%u\" "
-        "oninput=\"if(this.value>200){alert('MAX limit is 200 aircraft!'); this.value=200;} "
-        "if(this.value<10 && this.value!=''){this.value=10;}\">"
+        "<input type=\"number\" name=\"max_aircraft\" min=\"%d\" max=\"%d\" value=\"%u\" "
+        "oninput=\"if(this.value>%d){alert('MAX limit is %d aircraft!'); this.value=%d;} "
+        "if(this.value<%d && this.value!=''){this.value=%d;}\">"
         "</div>",
-        T(STR_WEB_MAX_AIRCRAFT), T(STR_WEB_MAX_AIRCRAFT_HELP), g_max_aircraft);
+        T(STR_WEB_MAX_AIRCRAFT), T(STR_WEB_MAX_AIRCRAFT_HELP),
+        MAX_AIRCRAFT_MIN, MAX_AIRCRAFT_MAX, g_max_aircraft,
+        MAX_AIRCRAFT_MAX, MAX_AIRCRAFT_MAX, MAX_AIRCRAFT_MAX,
+        MAX_AIRCRAFT_MIN, MAX_AIRCRAFT_MIN);
 
     hb_append(&hb,
         "<div><label>%s<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></label><select name='air_mode'>"
@@ -635,23 +762,28 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         g_squawk_alert_enabled == 1 ? "checked" : "");
 
     hb_append(&hb,
+        "<div class=\"setting-row\"><span class=\"setting-label\">%s"
+        "<span class=\"tip\" title=\"%s\">\xE2\x93\x98</span></span>"
+        "<label class=\"switch\"><input type=\"checkbox\" name=\"mil_prio\" value=\"1\" %s>"
+        "<span class=\"slider\"></span></label></div>",
+        T(STR_WEB_MIL_PRIORITY), T(STR_WEB_MIL_PRIORITY_HINT),
+        g_mil_priority_enabled == 1 ? "checked" : "");
+
+    hb_append(&hb,
         "<div class=\"setting-row\"><span class=\"setting-label\">%s</span>"
         "<label class=\"switch\"><input type=\"checkbox\" name=\"apts\" value=\"1\" %s>"
         "<span class=\"slider\"></span></label></div>",
         T(STR_WEB_APTS), g_apts_mode == 1 ? "checked" : "");
 
     hb_append(&hb,
-        "<div><label>%s</label><select name='trail_len'>"
-        "<option value='0' %s>%s</option><option value='15' %s>%s</option>"
-        "<option value='30' %s>%s</option><option value='60' %s>%s</option>"
-        "<option value='120' %s>%s</option>"
+        "<div><label>%s</label><select name='click_action'>"
+        "<option value='0' %s>%s</option><option value='1' %s>%s</option>"
+        "<option value='2' %s>%s</option>"
         "</select></div>",
-        T(STR_WEB_TRAIL_LEN),
-        g_trail_len == 0 ? "selected" : "", T(STR_WEB_TRAIL_0),
-        g_trail_len == 15 ? "selected" : "", T(STR_WEB_TRAIL_15),
-        g_trail_len == 30 ? "selected" : "", T(STR_WEB_TRAIL_30),
-        g_trail_len == 60 ? "selected" : "", T(STR_WEB_TRAIL_60),
-        g_trail_len == 120 ? "selected" : "", T(STR_WEB_TRAIL_120));
+        T(STR_WEB_CLICK_ACTION),
+        g_click_action == AIRCRAFT_CLICK_DISABLED ? "selected" : "", T(STR_WEB_CLICK_DISABLED),
+        g_click_action == AIRCRAFT_CLICK_DETAILS_PHOTO ? "selected" : "", T(STR_WEB_CLICK_DETAILS_PHOTO),
+        g_click_action == AIRCRAFT_CLICK_FLIGHT_TRACE ? "selected" : "", T(STR_WEB_CLICK_FLIGHT_TRACE));
 
     hb_append(&hb, "</div>"); // .grid2
 
@@ -844,6 +976,7 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     hb_append(&hb,
         "<script>"
         "var IS_AP_MODE=%s;"
+        "var uptimeSec=%" PRId64 ";"
         "var I18N={scanning:'%s',scanFoundPrefix:'%s',scanFoundSuffix:'%s',scanNone:'%s',"
         "saving:'%s',rebooting:'%s',saveError:'%s',"
         "importOk:'%s',importError:'%s',importSelectFile:'%s',"
@@ -1002,15 +1135,49 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "function pollMqttStatus(){"
         "var el=document.getElementById('mqtt-status-val');"
         "var led=document.getElementById('mqtt-led');"
-        "if(!el)return;"
+        "var dot=document.getElementById('mqtt-hdr-dot');"
         "fetch('/mqtt_status').then(function(r){return r.text();}).then(function(s){"
-        "var color='#64748b',label=I18N.mqttDisabled;"
-        "if(s==='connected'){color='#22c55e';label=I18N.mqttConnected;}"
-        "else if(s==='connecting'){color='#eab308';label=I18N.mqttConnecting;}"
-        "else if(s==='error'){color='#ef4444';label=I18N.mqttError;}"
-        "el.textContent=label;"
+        "var color='#64748b',label=I18N.mqttDisabled,cls='dot-disabled';"
+        "if(s==='connected'){color='#22c55e';label=I18N.mqttConnected;cls='dot-connected';}"
+        "else if(s==='connecting'){color='#eab308';label=I18N.mqttConnecting;cls='dot-connecting';}"
+        "else if(s==='error'){color='#ef4444';label=I18N.mqttError;cls='dot-error';}"
+        "if(el)el.textContent=label;"
         "if(led)led.style.background=color;"
+        "if(dot)dot.className='dot '+cls;"
         "}).catch(function(){});"
+        "}"
+        "function pollWifiStatus(){"
+        "var dot=document.getElementById('wifi-dot');"
+        "if(!dot)return;"
+        "fetch('/wifi_status').then(function(r){return r.text();}).then(function(s){"
+        "var cls='dot-connecting';"
+        "if(s==='connected')cls='dot-connected';"
+        "else if(s==='error')cls='dot-error';"
+        "dot.className='dot '+cls;"
+        "}).catch(function(){});"
+        "}"
+        "function pollHeaderStatus(){pollWifiStatus();pollMqttStatus();}"
+        // Formats uptimeSec the same way format_uptime() does server-side
+        // (see wifi_manager.c) - ticked locally every second below instead
+        // of polling the device, so the header clock stays smooth without
+        // adding HTTP traffic. The leftmost (largest) unit is left bare,
+        // every unit after it is zero-padded to 2 digits (e.g. "2m 03s",
+        // "1h 05m 12s", "1d 04h 15m") so a value never reads like a rollover
+        // ("1m 63s") even though it never actually happens - d/h/m/s are
+        // each derived straight from uptimeSec via div/mod on every tick,
+        // never incremented independently.
+        "function pad2(n){return n<10?'0'+n:''+n;}"
+        "function formatUptime(t){"
+        "var d=Math.floor(t/86400),h=Math.floor((t%%86400)/3600),"
+        "m=Math.floor((t%%3600)/60),s=t%%60;"
+        "if(d>0)return d+'d '+pad2(h)+'h '+pad2(m)+'m';"
+        "if(h>0)return h+'h '+pad2(m)+'m '+pad2(s)+'s';"
+        "return m+'m '+pad2(s)+'s';"
+        "}"
+        "function tickUptime(){"
+        "uptimeSec++;"
+        "var el=document.getElementById('uptime-val');"
+        "if(el)el.textContent=formatUptime(uptimeSec);"
         "}"
         "document.addEventListener('DOMContentLoaded',function(){"
         "var isAP=IS_AP_MODE||(window.location.hostname==='192.168.4.1');"
@@ -1021,12 +1188,14 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
         "try{savedTab=localStorage.getItem('active_tab');}catch(e){}"
         "showTab(hashTab||savedTab||'display');"
         "}"
-        "pollMqttStatus();"
-        "setInterval(pollMqttStatus,4000);"
+        "pollHeaderStatus();"
+        "setInterval(pollHeaderStatus,4000);"
+        "setInterval(tickUptime,1000);"
         "});"
         "</script>"
         "</body></html>",
         ap_mode ? "true" : "false",
+        uptime_sec,
         T(STR_WEB_SCANNING), T(STR_WEB_SCAN_FOUND_PREFIX), T(STR_WEB_SCAN_FOUND_SUFFIX), T(STR_WEB_SCAN_NONE),
         T(STR_WEB_SAVING_MSG), T(STR_WEB_REBOOTING_MSG), T(STR_WEB_SAVE_ERROR),
         T(STR_WEB_IMPORT_OK), T(STR_WEB_IMPORT_ERROR), T(STR_WEB_IMPORT_SELECT_FILE),
@@ -1042,9 +1211,9 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     }
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, page, hb.pos);
+    esp_err_t send_err = httpd_send_buf_chunked(req, page, hb.pos);
     free(page);
-    return ESP_OK;
+    return send_err;
 }
 
 #define SAVE_BODY_MAX_LEN 1024
@@ -1128,19 +1297,20 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     g_hide_ground = (httpd_query_key_value(buf, "gnd_show", param, sizeof(param)) == ESP_OK) ? 0 : 1;
     g_map_enabled = (httpd_query_key_value(buf, "map_en", param, sizeof(param)) == ESP_OK) ? 1 : 0;
     g_squawk_alert_enabled = (httpd_query_key_value(buf, "sqk_alert", param, sizeof(param)) == ESP_OK) ? 1 : 0;
+    g_mil_priority_enabled = (httpd_query_key_value(buf, "mil_prio", param, sizeof(param)) == ESP_OK) ? 1 : 0;
     if (httpd_query_key_value(buf, "lang", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
         wifi_mgr_set_lang((app_lang_t)atoi(param));
     }
-    if (httpd_query_key_value(buf, "trail_len", param, sizeof(param)) == ESP_OK) {
+    if (httpd_query_key_value(buf, "click_action", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
-        wifi_mgr_set_trail_len((uint8_t)atoi(param));
+        wifi_mgr_set_click_action((uint8_t)atoi(param));
     }
     if (httpd_query_key_value(buf, "max_aircraft", param, sizeof(param)) == ESP_OK) {
         url_decode(param);
         int max_val = atoi(param);
-        if (max_val > 200) max_val = 200;
-        if (max_val < 10)  max_val = 10;
+        if (max_val > MAX_AIRCRAFT_MAX) max_val = MAX_AIRCRAFT_MAX;
+        if (max_val < MAX_AIRCRAFT_MIN) max_val = MAX_AIRCRAFT_MIN;
         wifi_mgr_set_max_aircraft((uint16_t)max_val);
     }
     g_mqtt_enabled = (httpd_query_key_value(buf, "mqtt_en", param, sizeof(param)) == ESP_OK) ? 1 : 0;
@@ -1197,8 +1367,9 @@ static esp_err_t export_config_get_handler(httpd_req_t *req) {
     cJSON_AddNumberToObject(root, "hide_ground", g_hide_ground);
     cJSON_AddNumberToObject(root, "map_enabled", g_map_enabled);
     cJSON_AddNumberToObject(root, "squawk_alert", g_squawk_alert_enabled);
+    cJSON_AddNumberToObject(root, "mil_priority", g_mil_priority_enabled);
     cJSON_AddNumberToObject(root, "lang", g_lang);
-    cJSON_AddNumberToObject(root, "trail_len", g_trail_len);
+    cJSON_AddNumberToObject(root, "click_action", g_click_action);
     cJSON_AddNumberToObject(root, "max_aircraft", g_max_aircraft);
     cJSON_AddNumberToObject(root, "mqtt_enabled", g_mqtt_enabled);
     cJSON_AddStringToObject(root, "mqtt_host", g_mqtt_host);
@@ -1216,9 +1387,9 @@ static esp_err_t export_config_get_handler(httpd_req_t *req) {
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"radar_config.json\"");
-    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    esp_err_t send_err = httpd_send_buf_chunked(req, json, strlen(json));
     free(json);
-    return ESP_OK;
+    return send_err;
 }
 
 #define IMPORT_BODY_MAX_LEN 2048
@@ -1302,11 +1473,14 @@ static esp_err_t import_config_post_handler(httpd_req_t *req) {
     if ((item = cJSON_GetObjectItem(root, "squawk_alert")) && cJSON_IsNumber(item)) {
         g_squawk_alert_enabled = (item->valueint == 1) ? 1 : 0;
     }
+    if ((item = cJSON_GetObjectItem(root, "mil_priority")) && cJSON_IsNumber(item)) {
+        g_mil_priority_enabled = (item->valueint == 1) ? 1 : 0;
+    }
     if ((item = cJSON_GetObjectItem(root, "lang")) && cJSON_IsNumber(item)) {
         wifi_mgr_set_lang((app_lang_t)item->valueint);
     }
-    if ((item = cJSON_GetObjectItem(root, "trail_len")) && cJSON_IsNumber(item)) {
-        wifi_mgr_set_trail_len((uint8_t)item->valueint);
+    if ((item = cJSON_GetObjectItem(root, "click_action")) && cJSON_IsNumber(item)) {
+        wifi_mgr_set_click_action((uint8_t)item->valueint);
     }
     if ((item = cJSON_GetObjectItem(root, "max_aircraft")) && cJSON_IsNumber(item)) {
         wifi_mgr_set_max_aircraft((uint16_t)item->valueint);
@@ -1604,6 +1778,21 @@ static esp_err_t mqtt_status_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// Lightweight text status for the web panel header pill, mirroring
+// mqtt_status_get_handler() above - lets the browser poll live Wi-Fi
+// connection status without a full page reload.
+static esp_err_t wifi_status_get_handler(httpd_req_t *req) {
+    const char *status_str;
+    switch (s_web_wifi_status) {
+        case WIFI_STATUS_CONNECTED:  status_str = "connected"; break;
+        case WIFI_STATUS_ERROR:      status_str = "error"; break;
+        case WIFI_STATUS_CONNECTING:
+        default:                     status_str = "connecting"; break;
+    }
+    httpd_resp_sendstr(req, status_str);
+    return ESP_OK;
+}
+
 // Performs a blocking, out-of-cycle firmware version check against the
 // hardcoded OTA_VERSION_CHECK_URL manifest. Responds with the fresh version
 // state as JSON so the browser can update the System tab in place instead
@@ -1632,6 +1821,17 @@ static void start_web_server(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 10240;
     config.max_uri_handlers = 12;
+    // Caps how many lwIP sockets this httpd instance can hold open at once -
+    // the config panel never needs more than a couple of simultaneous
+    // browser connections, and the IDF default (7) was letting httpd eat
+    // into the same global lwIP socket table shared with MQTT, the ADS-B
+    // poller, map tile fetches and photo/OTA HTTPS requests, causing
+    // "httpd_accept_conn: error in accept (23)" (ENFILE) and downstream
+    // "esp-tls: Failed to create socket" failures in PHOTO_SVC/OTA_UPDATE.
+    // lru_purge_enable lets httpd close its own oldest idle connection
+    // instead of rejecting a new one outright when it is at that cap.
+    config.max_open_sockets = 4;
+    config.lru_purge_enable = true;
     httpd_uri_t root_uri = {.uri = "/", .method = HTTP_GET, .handler = root_get_handler};
     httpd_uri_t save_uri = {.uri = "/save", .method = HTTP_POST, .handler = save_post_handler};
     httpd_uri_t brightness_uri = {.uri = "/set_brightness", .method = HTTP_GET, .handler = set_brightness_get_handler};
@@ -1640,6 +1840,7 @@ static void start_web_server(void) {
     httpd_uri_t import_uri = {.uri = "/import_config", .method = HTTP_POST, .handler = import_config_post_handler};
     httpd_uri_t update_uri = {.uri = "/update", .method = HTTP_POST, .handler = update_post_handler};
     httpd_uri_t mqtt_status_uri = {.uri = "/mqtt_status", .method = HTTP_GET, .handler = mqtt_status_get_handler};
+    httpd_uri_t wifi_status_uri = {.uri = "/wifi_status", .method = HTTP_GET, .handler = wifi_status_get_handler};
     httpd_uri_t check_update_uri = {.uri = "/check_update", .method = HTTP_POST, .handler = check_update_post_handler};
 
     if (httpd_start(&g_web_server, &config) == ESP_OK) {
@@ -1651,6 +1852,7 @@ static void start_web_server(void) {
         httpd_register_uri_handler(g_web_server, &import_uri);
         httpd_register_uri_handler(g_web_server, &update_uri);
         httpd_register_uri_handler(g_web_server, &mqtt_status_uri);
+        httpd_register_uri_handler(g_web_server, &wifi_status_uri);
         httpd_register_uri_handler(g_web_server, &check_update_uri);
         ESP_LOGI(TAG, "Radar configuration web panel started on port 80!");
     }
@@ -1663,11 +1865,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         esp_wifi_connect();
         radar_ui_wifi_notify_connecting(g_wifi_ssid);
         radar_ui_update_wifi_status(WIFI_STATUS_CONNECTING);
+        s_web_wifi_status = WIFI_STATUS_CONNECTING;
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGI(TAG, "Wi-Fi disconnected, retrying connection...");
         esp_wifi_connect();
         radar_ui_wifi_notify_connecting(g_wifi_ssid);
         radar_ui_update_wifi_status(WIFI_STATUS_ERROR);
+        s_web_wifi_status = WIFI_STATUS_ERROR;
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Connected to Wi-Fi. Obtained IP address: " IPSTR, IP2STR(&event->ip_info.ip));
@@ -1677,6 +1881,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&event->ip_info.ip));
         radar_ui_wifi_notify_connected(ip_str);
         radar_ui_update_wifi_status(WIFI_STATUS_CONNECTED);
+        s_web_wifi_status = WIFI_STATUS_CONNECTED;
     }
 }
 
@@ -1759,6 +1964,7 @@ static void start_ap_mode(void) {
     ESP_LOGI(TAG, "SoftAP started: SSID='%s' (no password). Connect and go to http://192.168.4.1/", AP_SSID);
     radar_ui_wifi_notify_ap_mode(AP_SSID, "");
     radar_ui_update_wifi_status(WIFI_STATUS_CONNECTING);
+    s_web_wifi_status = WIFI_STATUS_CONNECTING; // SoftAP/setup mode reuses the "connecting" pill state
     start_web_server();
 }
 
@@ -1771,8 +1977,6 @@ void wifi_manager_init(void) {
     ESP_ERROR_CHECK(ret);
 
     load_settings_from_nvs();
-
-    g_https_mutex = xSemaphoreCreateMutex();
 
     s_wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());

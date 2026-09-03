@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
@@ -73,6 +74,20 @@ static bool hide_ground_traffic = true;
 // size (airports.h), to keep 60 FPS with hundreds of database entries.
 #define MAX_VISIBLE_AIRPORTS 40
 
+// Sidebar aircraft list cards - narrower than list_cont's full 396px width,
+// leaving a dedicated right-hand gutter for the scrollbar (styled at
+// list_cont's LV_PART_SCROLLBAR, see radar_ui_init()) so it never overlaps
+// the selection border or the vertical-rate trend symbol.
+#define LIST_SCROLLBAR_GUTTER 12
+#define LIST_ITEM_WIDTH       (396 - LIST_SCROLLBAR_GUTTER)
+
+// Unified aircraft detail modal (popup_card, see radar_ui_init()) - shared
+// by its creation code and radar_ui_set_aircraft_photo()'s cover-crop
+// target so the hero photo always fills popup_hero edge-to-edge regardless
+// of which one is read first.
+#define POPUP_CARD_WIDTH   332
+#define POPUP_HERO_HEIGHT  165
+
 typedef struct {
     lv_obj_t *marker;
     lv_obj_t *label;
@@ -101,6 +116,7 @@ typedef struct {
     bool     calc_vec_visible;
     bool     calc_is_military;
     bool     calc_is_lpr;
+    bool     calc_is_selected;
     int      calc_vec_pt_count;
     lv_point_precise_t vec_pts_calc[MAX_TRACK_POINTS + 2];
     lv_color_t calc_color;
@@ -139,14 +155,17 @@ static lv_obj_t *lbl_gnd_toggle;
 static lv_obj_t *btn_map_toggle;
 static lv_obj_t *lbl_map_toggle;
 
-static lv_obj_t *popup_card_cont;
-static lv_obj_t *popup_top_box;
-static lv_obj_t *popup_lbl_count;
+// Unified aircraft detail modal - one card (popup_card) with the hero photo
+// (popup_hero/popup_img_preview/popup_lbl_credit) flowing directly into the
+// data body (popup_body and its children) below it, no gap/separate frames.
+static lv_obj_t *popup_card;
+static lv_obj_t *popup_hero;
 static lv_obj_t *popup_img_preview;
 static lv_obj_t *popup_lbl_credit;
 
-static lv_obj_t *popup_hud_box;
-static lv_obj_t *popup_lbl_title;
+static lv_obj_t *popup_body;
+static lv_obj_t *popup_lbl_callsign;
+static lv_obj_t *popup_lbl_typereg;
 static lv_obj_t *popup_lbl_col_left;
 static lv_obj_t *popup_lbl_col_right;
 static lv_obj_t *popup_lbl_route;
@@ -155,8 +174,13 @@ static lv_obj_t *banner_alert;
 static lv_obj_t *banner_lbl;
 static bool banner_visible_prev = false;
 
-// Wi-Fi status notification card - overlay shown on top of the whole
-// screen (like banner_alert above) reporting AP/connecting/connected state.
+// Wi-Fi status - shown inline in status_badge's WIFI chip (dot + label),
+// expanding the label text horizontally to the right instead of opening a
+// separate drawer/card. status_badge is LV_ALIGN_BOTTOM_LEFT with
+// LV_FLEX_FLOW_ROW + LV_SIZE_CONTENT width, so lengthening wifi_led_label's
+// text alone grows the whole pill rightward along the bottom edge - it can
+// never creep upward into the radar area. Tapping the WIFI dot/label
+// toggles expanded/collapsed - see wifi_status_click_cb().
 typedef enum {
     WIFI_NOTIFY_NONE = 0,
     WIFI_NOTIFY_AP,
@@ -164,25 +188,26 @@ typedef enum {
     WIFI_NOTIFY_CONNECTED,
 } wifi_notify_state_t;
 
-static lv_obj_t *wifi_card;
-static lv_obj_t *wifi_card_title;
-static lv_obj_t *wifi_card_body;
-static lv_timer_t *wifi_card_hide_timer = NULL;
-// True once radar_ui_build() has created the card widgets - notify calls
+static lv_obj_t *wifi_led_label;
+static lv_timer_t *wifi_badge_collapse_timer = NULL;
+// True once radar_ui_build() has created the badge widgets - notify calls
 // arriving earlier (Wi-Fi connects during wifi_manager_init(), before the
 // display is even started) only update the cached state below, which is
-// applied to the freshly built card at the end of radar_ui_build().
-static bool wifi_card_ready = false;
+// applied to the freshly built badge at the end of radar_ui_build().
+static bool wifi_badge_ready = false;
+// Whether the WIFI chip currently shows the extended text (IP/SSID/etc.)
+// instead of just "WIFI" - toggled by wifi_status_click_cb(), auto-cleared
+// by wifi_badge_collapse_timer_cb() 5s after a connect.
+static bool s_wifi_expanded = false;
 
 static wifi_notify_state_t s_wifi_notify_state = WIFI_NOTIFY_NONE;
 static char s_wifi_notify_ssid[WIFI_SSID_MAX_LEN] = "";
 static char s_wifi_notify_pass[WIFI_PASS_MAX_LEN] = "";
 static char s_wifi_notify_ip[32] = "";
 
-// MQTT status notification card - independent twin of wifi_card above,
-// positioned below it so the two never visually overlap if both are
-// briefly visible around the same time (e.g. Wi-Fi reconnect while MQTT
-// is also mid-reconnect).
+// MQTT status - independent twin of the WIFI chip above, same inline-
+// expansion mechanism. Tapping the MQTT dot/label toggles expanded/
+// collapsed - see mqtt_status_click_cb().
 typedef enum {
     MQTT_NOTIFY_NONE = 0,
     MQTT_NOTIFY_CONNECTING,
@@ -190,16 +215,14 @@ typedef enum {
     MQTT_NOTIFY_ERROR,
 } mqtt_notify_state_t;
 
-static lv_obj_t *mqtt_card;
-static lv_obj_t *mqtt_card_title;
-static lv_obj_t *mqtt_card_body;
-static lv_timer_t *mqtt_card_hide_timer = NULL;
-static bool mqtt_card_ready = false;
+static lv_timer_t *mqtt_badge_collapse_timer = NULL;
+static bool mqtt_badge_ready = false;
+static bool s_mqtt_expanded = false;
 static mqtt_notify_state_t s_mqtt_notify_state = MQTT_NOTIFY_NONE;
 
 // Modal status bubble for the sequential map-tiles -> ADS-B startup/RNG-
-// change fetch (see map_tile_service.c/adsb_service.c) - single-label twin
-// of wifi_card/mqtt_card above, same visual style.
+// change fetch (see map_tile_service.c/adsb_service.c) - top-center pill,
+// same dark/green visual style as status_badge below.
 typedef enum {
     LOADING_NOTIFY_NONE = 0,
     LOADING_NOTIFY_MAP,
@@ -312,6 +335,15 @@ static char selected_callsign[12] = "";
 static char selected_reg[16] = "";
 static char selected_model[8] = "";
 
+// Set for exactly one radar_ui_refresh() call after the user directly
+// selects a new aircraft (map icon or list row tap) - consumed and cleared
+// in the apply phase below, once the selected row's list_item is
+// positioned and scrolled into view. Left false on every periodic
+// background refresh (ADS-B poll) so re-sorting/re-positioning the list
+// while the same aircraft stays selected never yanks the view away from
+// whatever the user is currently browsing.
+static bool s_scroll_to_selected_pending = false;
+
 static inline void lv_obj_set_hidden(lv_obj_t *obj, bool hidden) {
     if (!obj) return;
     if (hidden) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
@@ -340,6 +372,23 @@ static const lv_image_dsc_t* get_aircraft_dsc(AircraftType type) {
     return &aircraft_yellow_20;
 }
 
+// Sidebar list ordering: military contacts always above civilian ones;
+// within the same category, nearest first.
+static int list_order_cmp(const void *a, const void *b) {
+    int ia = *(const int *)a;
+    int ib = *(const int *)b;
+    if (wifi_mgr_get_mil_priority_enabled()) {
+        bool mil_a = ui_slots[ia].calc_is_military;
+        bool mil_b = ui_slots[ib].calc_is_military;
+        if (mil_a != mil_b) return mil_a ? -1 : 1;
+    }
+    float da = ui_slots[ia].calc_distance_km;
+    float db = ui_slots[ib].calc_distance_km;
+    if (da < db) return -1;
+    if (da > db) return 1;
+    return 0;
+}
+
 // ================= AIRCRAFT UI UPDATE =================
 void radar_ui_refresh(void) {
     if (!live_fleet || !ui_slots || !g_refresh_serialize_mutex) return;
@@ -356,12 +405,11 @@ void radar_ui_refresh(void) {
 
     uint32_t now = get_time_ms();
     float current_range_km = range_steps[current_range_idx];
-    uint8_t trail_len = wifi_mgr_get_trail_len();
+    aircraft_click_action_t click_action = (aircraft_click_action_t)wifi_mgr_get_click_action();
     uint16_t max_aircraft = wifi_mgr_get_max_aircraft();
     if (max_aircraft > MAX_AIRCRAFT_CAPACITY) max_aircraft = MAX_AIRCRAFT_CAPACITY;
 
     int visible_count = 0;
-    int list_y_offset = 0;
     AircraftData *selected_ac = NULL;
 
     // ---- "compute" phase: trigonometry and label data, only under
@@ -415,22 +463,23 @@ void radar_ui_refresh(void) {
             ui_slots[i].calc_lat = live_fleet[i].lat;
             ui_slots[i].calc_lon = live_fleet[i].lon;
 
-            ui_slots[i].calc_list_y = list_y_offset;
-            list_y_offset += 65;
+            ui_slots[i].calc_is_selected = selected_hex[0] != '\0' && strcmp(selected_hex, live_fleet[i].hex) == 0;
 
-            // Flight trail vector - point count capped by trail_len from NVS
-            // (web panel). trail_len==0 -> trail fully disabled.
-            AircraftTrackHistory *th = (trail_len > 0) ? find_aircraft_track(live_fleet[i].hex) : NULL;
-            if(th && th->pt_count >= 1) {
-                int cap = trail_len;
-                if (cap > MAX_TRACK_POINTS) cap = MAX_TRACK_POINTS;
-                int pts_to_draw = th->pt_count > cap ? cap : th->pt_count;
-                int start_idx = th->pt_count - pts_to_draw; // most recent pts_to_draw points
-                for(int p = 0; p < pts_to_draw; p++) {
+            // Flight trace line (AIRCRAFT_CLICK_FLIGHT_TRACE) - only ever
+            // drawn for the selected aircraft, from the asynchronously
+            // fetched g_trace_points buffer (adsb_service.c). Downsampled to
+            // MAX_TRACK_POINTS if the API returned more points than that.
+            if (ui_slots[i].calc_is_selected && click_action == AIRCRAFT_CLICK_FLIGHT_TRACE &&
+                g_trace_point_count > 0 && strcmp(g_trace_hex, live_fleet[i].hex) == 0) {
+                int n = g_trace_point_count;
+                int step = (n > MAX_TRACK_POINTS) ? (n + MAX_TRACK_POINTS - 1) / MAX_TRACK_POINTS : 1;
+                int pts_to_draw = 0;
+                for (int p = 0; p < n && pts_to_draw < MAX_TRACK_POINTS; p += step) {
                     int tp_x, tp_y;
-                    radar_geo_to_screen_px(th->lats[start_idx + p], th->lons[start_idx + p], &tp_x, &tp_y);
-                    ui_slots[i].vec_pts_calc[p].x = tp_x;
-                    ui_slots[i].vec_pts_calc[p].y = tp_y;
+                    radar_geo_to_screen_px(g_trace_points[p].lat, g_trace_points[p].lon, &tp_x, &tp_y);
+                    ui_slots[i].vec_pts_calc[pts_to_draw].x = tp_x;
+                    ui_slots[i].vec_pts_calc[pts_to_draw].y = tp_y;
+                    pts_to_draw++;
                 }
                 ui_slots[i].vec_pts_calc[pts_to_draw].x = px;
                 ui_slots[i].vec_pts_calc[pts_to_draw].y = py;
@@ -441,6 +490,19 @@ void radar_ui_refresh(void) {
             }
         } else {
             ui_slots[i].calc_visible = false;
+        }
+    }
+
+    // Sidebar list order: military contacts first, then by distance ascending.
+    {
+        int list_order[MAX_AIRCRAFT_CAPACITY];
+        int list_order_count = 0;
+        for (int i = 0; i < MAX_AIRCRAFT_CAPACITY; i++) {
+            if (ui_slots[i].calc_visible) list_order[list_order_count++] = i;
+        }
+        qsort(list_order, list_order_count, sizeof(int), list_order_cmp);
+        for (int k = 0; k < list_order_count; k++) {
+            ui_slots[list_order[k]].calc_list_y = k * 65;
         }
     }
 
@@ -575,11 +637,48 @@ void radar_ui_refresh(void) {
         lv_obj_set_pos(ui_slots[i].radar_label, ui_slots[i].calc_px + ui_slots[i].calc_half_w + 6, ui_slots[i].calc_py - ui_slots[i].calc_half_h);
         lv_image_set_rotation(ui_slots[i].radar_icon, ui_slots[i].calc_heading_x10);
 
-        lv_label_set_text_fmt(ui_slots[i].radar_label, "%s\n%d ft", ui_slots[i].calc_id, ui_slots[i].calc_altitude_ft);
+        // Second line always shows altitude; ICAO type code is appended when known
+        // (aircraft->model, e.g. "C152", "F16") so map labels stay consistent.
+        if (ui_slots[i].calc_model[0] != '\0') {
+            lv_label_set_text_fmt(ui_slots[i].radar_label, "%s\n%d ft  %s",
+                                   ui_slots[i].calc_id, ui_slots[i].calc_altitude_ft, ui_slots[i].calc_model);
+        } else {
+            lv_label_set_text_fmt(ui_slots[i].radar_label, "%s\n%d ft",
+                                   ui_slots[i].calc_id, ui_slots[i].calc_altitude_ft);
+        }
         lv_obj_set_style_text_color(ui_slots[i].radar_label, ui_slots[i].calc_color, 0);
 
         lv_obj_set_hidden(ui_slots[i].list_item, false);
         lv_obj_set_pos(ui_slots[i].list_item, 0, ui_slots[i].calc_list_y);
+
+        // Selection highlight - shown for the clicked aircraft (radar icon
+        // or this list row) whenever clicks are not disabled, regardless of
+        // which click action (popup/trace) is active.
+        if (ui_slots[i].calc_is_selected) {
+            // Subtle 1px cyan outline instead of the old thick/bright 2px
+            // blue border - a faint dark-green background tint keeps the
+            // row readable without the heavy border doing all the work.
+            lv_obj_set_style_bg_opa(ui_slots[i].list_item, LV_OPA_30, 0);
+            lv_obj_set_style_bg_color(ui_slots[i].list_item, lv_color_hex(0x10241b), 0);
+            lv_obj_set_style_border_width(ui_slots[i].list_item, 1, 0);
+            lv_obj_set_style_border_color(ui_slots[i].list_item, lv_color_hex(0x26c6da), 0);
+            lv_obj_set_style_radius(ui_slots[i].list_item, 6, 0);
+
+            // Auto-scroll the sidebar to the just-selected aircraft - only
+            // once per direct user selection (see s_scroll_to_selected_pending),
+            // never on a periodic background refresh. list_item is already
+            // positioned (lv_obj_set_pos above) and unhidden at this point,
+            // so this is safe even if the row just got created/repositioned
+            // by this same refresh pass - LVGL recalculates layout/scroll
+            // extents synchronously on lv_obj_set_pos, not lazily.
+            if (s_scroll_to_selected_pending) {
+                lv_obj_scroll_to_view(ui_slots[i].list_item, LV_ANIM_ON);
+                s_scroll_to_selected_pending = false;
+            }
+        } else {
+            lv_obj_set_style_bg_opa(ui_slots[i].list_item, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(ui_slots[i].list_item, 0, 0);
+        }
 
         lv_image_set_src(ui_slots[i].list_icon, ui_slots[i].calc_dsc);
         lv_image_set_pivot(ui_slots[i].list_icon, ui_slots[i].calc_half_w, ui_slots[i].calc_half_h);
@@ -596,8 +695,11 @@ void radar_ui_refresh(void) {
             lv_label_set_text(ui_slots[i].list_lbl_cs, ui_slots[i].calc_id);
             lv_obj_set_style_text_color(ui_slots[i].list_lbl_cs, lv_color_hex(0xffffff), 0);
         }
-        lv_label_set_text_fmt(ui_slots[i].list_lbl_sub, "%s  %.1fKM  %d FT  %s  %dKT",
-                              ui_slots[i].calc_model, ui_slots[i].calc_distance_km, ui_slots[i].calc_altitude_ft,
+        // Fixed 4-char field for the ICAO type code so this column never
+        // shifts the KM/FT/KT fields that follow it, model unknown or not.
+        const char *model_disp = ui_slots[i].calc_model[0] != '\0' ? ui_slots[i].calc_model : "----";
+        lv_label_set_text_fmt(ui_slots[i].list_lbl_sub, "%-4.4s  %.1fKM  %d FT  %s  %dKT",
+                              model_disp, ui_slots[i].calc_distance_km, ui_slots[i].calc_altitude_ft,
                               ui_slots[i].calc_vsi_str, ui_slots[i].calc_speed_kt);
         lv_label_set_text_fmt(ui_slots[i].list_lbl_route, "HDG: %d deg  LAT: %.2f  LON: %.2f",
                               ui_slots[i].calc_heading_deg, ui_slots[i].calc_lat, ui_slots[i].calc_lon);
@@ -614,12 +716,26 @@ void radar_ui_refresh(void) {
         }
     }
 
+    // Re-clamp list_cont's scroll offset to the (possibly now shorter)
+    // content height - LVGL only auto-adjusts scroll position on layout
+    // events, not on manual lv_obj_set_pos()/hidden-flag changes to
+    // absolutely-positioned children (this list has no flex layout), so a
+    // list scrolled down that then shrinks (aircraft leaving range/timeout)
+    // would otherwise stay scrolled past the new bottom, leaving dead space
+    // under the last card until the user manually scrolls back up.
+    lv_obj_readjust_scroll(list_cont, LV_ANIM_OFF);
+
+    // Safety net: if the selected aircraft's row was not visible this pass
+    // (e.g. it dropped out of range/filter between the click and this
+    // refresh, or its list_item hasn't been laid out yet), drop the pending
+    // scroll instead of retrying it on a later background refresh, which
+    // would yank the view out from under the user unexpectedly.
+    s_scroll_to_selected_pending = false;
+
     lv_label_set_text_fmt(lbl_status_count, T(STR_TRAFFIC_FMT), visible_count, (int)current_range_km);
 
-    if (has_selection) {
-        lv_obj_set_hidden(popup_card_cont, false);
-
-        lv_label_set_text_fmt(popup_lbl_count, "%d", visible_count);
+    if (has_selection && click_action == AIRCRAFT_CLICK_DETAILS_PHOTO) {
+        lv_obj_set_hidden(popup_card, false);
 
         if (strcmp(popup_photo_hex, sel_hex) != 0) {
             popup_photo_release();
@@ -634,15 +750,26 @@ void radar_ui_refresh(void) {
             photo_service_request(sel_hex, sel_reg, sel_model);
         }
 
-        lv_label_set_text_fmt(popup_lbl_title, "%s  %s  [%s]", sel_id, sel_model, sel_reg);
+        lv_label_set_text(popup_lbl_callsign, sel_id);
+        lv_label_set_text_fmt(popup_lbl_typereg, "%s  %s", sel_model, sel_reg);
 
-        lv_label_set_text_fmt(popup_lbl_col_left, "ALT  %d ft\nSPD  %d kt\nDIST %.1f km", sel_alt, sel_spd, sel_dist);
+        // #hex text# spans (lv_label_set_recolor() enabled at creation) give
+        // the muted-label/bright-value hierarchy without a widget per field.
+        lv_label_set_text_fmt(popup_lbl_col_left,
+            "#8094a5 ALT#  #ffffff %d ft#\n"
+            "#8094a5 SPD#  #ffffff %d kt#\n"
+            "#8094a5 DIST# #ffffff %.1f km#",
+            sel_alt, sel_spd, sel_dist);
 
-        lv_label_set_text_fmt(popup_lbl_col_right, "V/S  %s\nHDG  %03d\nSQK  %s", sel_vsi, sel_hdg, sel_squawk);
+        lv_label_set_text_fmt(popup_lbl_col_right,
+            "#8094a5 V/S#  #ffffff %s#\n"
+            "#8094a5 HDG#  #ffffff %03d#\n"
+            "#8094a5 SQK#  #ffffff %s#",
+            sel_vsi, sel_hdg, sel_squawk);
 
         lv_label_set_text_fmt(popup_lbl_route, "LAT: %.2f  LON: %.2f  (%s)", sel_lat, sel_lon, g_station_name);
     } else {
-        lv_obj_set_hidden(popup_card_cont, true);
+        lv_obj_set_hidden(popup_card, true);
         popup_photo_release();
         stop_loading_pulse(popup_lbl_credit);
         popup_photo_hex[0] = '\0';
@@ -864,25 +991,42 @@ bool radar_ui_get_map_enabled(void) {
 }
 
 static void select_aircraft_by_index(int idx) {
+    aircraft_click_action_t action = (aircraft_click_action_t)wifi_mgr_get_click_action();
+    if (action == AIRCRAFT_CLICK_DISABLED) return;
+
     if (!adsb_service_lock(100)) return;
 
     bool need_refresh = false;
+    bool deselected = false;
+    char new_hex[8] = "";
     if(live_fleet && idx >= 0 && idx < MAX_AIRCRAFT_CAPACITY && live_fleet[idx].active) {
         if(strcmp(selected_hex, live_fleet[idx].hex) == 0) {
             selected_hex[0] = '\0';
             selected_callsign[0] = '\0';
             selected_reg[0] = '\0';
             selected_model[0] = '\0';
+            deselected = true;
         } else {
             snprintf(selected_hex, sizeof(selected_hex), "%s", live_fleet[idx].hex);
             snprintf(selected_callsign, sizeof(selected_callsign), "%s", live_fleet[idx].callsign);
             snprintf(selected_reg, sizeof(selected_reg), "%s", live_fleet[idx].registration);
             snprintf(selected_model, sizeof(selected_model), "%s", live_fleet[idx].model);
+            snprintf(new_hex, sizeof(new_hex), "%s", live_fleet[idx].hex);
+            // Direct user selection (map icon or list row tap) - scroll the
+            // sidebar to this aircraft on the very next refresh, see
+            // s_scroll_to_selected_pending.
+            s_scroll_to_selected_pending = true;
         }
         need_refresh = true;
     }
 
     adsb_service_unlock();
+
+    if (deselected) {
+        adsb_service_clear_trace();
+    } else if (new_hex[0] != '\0' && action == AIRCRAFT_CLICK_FLIGHT_TRACE) {
+        adsb_service_request_trace(new_hex);
+    }
 
     if (need_refresh) radar_ui_refresh();
 }
@@ -919,10 +1063,10 @@ void radar_ui_set_aircraft_photo(const lv_image_dsc_t *img_dsc, const char *phot
     if (img_dsc) {
         popup_photo_dsc = img_dsc;
 
-        // FR24-style "cover" cropping - the photo fills the whole tile
-        // (300x165, ~292x157 inside padding), popup_top_box clips
-        // anything beyond its own bounds.
-        int target_w = 292, target_h = 157;
+        // FR24-style "cover" cropping - the photo fills the whole hero area
+        // edge-to-edge (POPUP_CARD_WIDTH x POPUP_HERO_HEIGHT), popup_hero
+        // (clip_corner + no padding) clips anything beyond its own bounds.
+        int target_w = POPUP_CARD_WIDTH, target_h = POPUP_HERO_HEIGHT;
         uint32_t scale_w = (uint32_t)target_w * 256 / img_dsc->header.w;
         uint32_t scale_h = (uint32_t)target_h * 256 / img_dsc->header.h;
         uint32_t scale = scale_w > scale_h ? scale_w : scale_h;
@@ -959,6 +1103,7 @@ static void popup_close_event_cb(lv_event_t *e) {
         selected_model[0] = '\0';
         adsb_service_unlock();
     }
+    adsb_service_clear_trace();
     radar_ui_refresh();
 }
 
@@ -973,150 +1118,184 @@ static void create_radar_circle(lv_obj_t *parent, int radius) {
     lv_obj_clear_flag(circ, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 }
 
-// ================= WI-FI STATUS NOTIFICATION =================
-static void wifi_card_hide_timer_cb(lv_timer_t *timer) {
+// ================= WI-FI STATUS (inline in status_badge) =================
+static void wifi_badge_collapse_timer_cb(lv_timer_t *timer) {
     (void)timer;
-    lv_obj_add_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
+    s_wifi_expanded = false;
+    lv_obj_set_style_text_color(wifi_led_label, lv_color_hex(0x8b949e), 0);
+    lv_label_set_text(wifi_led_label, "WIFI");
     // The timer is a one-shot (repeat count 1) - LVGL deletes it right after
     // this callback returns, so drop our reference to avoid a dangling
-    // lv_timer_del() call on it from apply_wifi_card() later.
-    wifi_card_hide_timer = NULL;
+    // lv_timer_del() call on it from apply_wifi_badge() later.
+    wifi_badge_collapse_timer = NULL;
 }
 
-// Applies s_wifi_notify_state/ssid/pass/ip to the card widgets. Takes
-// bsp_display_lock() itself - never call this while already holding it.
-static void apply_wifi_card(void) {
-    if (!wifi_card_ready) return;
+// Applies s_wifi_notify_state/s_wifi_expanded/ssid/pass/ip to wifi_led_label.
+// Collapsed just shows "WIFI"; expanded shows the connection detail. A
+// CONNECTED expansion (re)arms a 5s timer that reverts back to collapsed -
+// AP mode is the exception: it stays expanded permanently (no timer, and
+// s_wifi_expanded is ignored) since the SSID/IP are needed to actually join
+// the setup network, and there is no "connected" event to reveal them again
+// later. Growing the label text is enough to widen the whole status_badge
+// pill rightward - see the LV_FLEX_FLOW_ROW/LV_SIZE_CONTENT comment on the
+// state block above. Takes bsp_display_lock() itself - never call this
+// while already holding it. Also invoked by wifi_status_click_cb() to
+// toggle s_wifi_expanded.
+static void apply_wifi_badge(void) {
+    if (!wifi_badge_ready) return;
 
     bsp_display_lock(0);
 
-    if (wifi_card_hide_timer) {
-        lv_timer_del(wifi_card_hide_timer);
-        wifi_card_hide_timer = NULL;
+    if (wifi_badge_collapse_timer) {
+        lv_timer_del(wifi_badge_collapse_timer);
+        wifi_badge_collapse_timer = NULL;
+    }
+
+    if (s_wifi_notify_state == WIFI_NOTIFY_AP) {
+        lv_obj_set_style_text_color(wifi_led_label, lv_color_hex(0xffc107), 0);
+        lv_label_set_text_fmt(wifi_led_label, "AP: %s (192.168.4.1)", s_wifi_notify_ssid);
+        bsp_display_unlock();
+        return;
+    }
+
+    if (!s_wifi_expanded || s_wifi_notify_state == WIFI_NOTIFY_NONE) {
+        lv_obj_set_style_text_color(wifi_led_label, lv_color_hex(0x8b949e), 0);
+        lv_label_set_text(wifi_led_label, "WIFI");
+        bsp_display_unlock();
+        return;
     }
 
     switch (s_wifi_notify_state) {
-        case WIFI_NOTIFY_AP: {
-            lv_obj_set_style_border_color(wifi_card, lv_color_hex(0x00e676), 0);
-            lv_obj_set_style_text_color(wifi_card_title, lv_color_hex(0xffc107), 0);
-            lv_label_set_text(wifi_card_title, LV_SYMBOL_WARNING);
-            const char *pass_display = s_wifi_notify_pass[0] ? s_wifi_notify_pass : T(STR_WIFI_NONE_OPEN);
-            lv_label_set_text_fmt(wifi_card_body, "%s\n%s: %s\n%s: %s\nhttp://192.168.4.1",
-                                   T(STR_WIFI_AP_TITLE),
-                                   T(STR_WIFI_SSID_LABEL), s_wifi_notify_ssid,
-                                   T(STR_WIFI_PASSWORD_LABEL), pass_display);
-            lv_obj_clear_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
-            break;
-        }
         case WIFI_NOTIFY_CONNECTING:
-            lv_obj_set_style_border_color(wifi_card, lv_color_hex(0x00f0ff), 0);
-            lv_obj_set_style_text_color(wifi_card_title, lv_color_hex(0x00f0ff), 0);
-            lv_label_set_text(wifi_card_title, LV_SYMBOL_REFRESH);
-            lv_label_set_text_fmt(wifi_card_body, T(STR_WIFI_CONNECTING_FMT), s_wifi_notify_ssid);
-            lv_obj_clear_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_color(wifi_led_label, lv_color_hex(0x00f0ff), 0);
+            lv_label_set_text_fmt(wifi_led_label, T(STR_WIFI_CONNECTING_FMT), s_wifi_notify_ssid);
             break;
         case WIFI_NOTIFY_CONNECTED:
-            lv_obj_set_style_border_color(wifi_card, lv_color_hex(0x00e676), 0);
-            lv_obj_set_style_text_color(wifi_card_title, lv_color_hex(0x00e676), 0);
-            lv_label_set_text(wifi_card_title, LV_SYMBOL_OK);
-            lv_label_set_text_fmt(wifi_card_body, T(STR_WIFI_CONNECTED_FMT), s_wifi_notify_ip);
-            lv_obj_clear_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
-            wifi_card_hide_timer = lv_timer_create(wifi_card_hide_timer_cb, 3500, NULL);
-            lv_timer_set_repeat_count(wifi_card_hide_timer, 1);
+            lv_obj_set_style_text_color(wifi_led_label, lv_color_hex(0x00ff88), 0);
+            lv_label_set_text_fmt(wifi_led_label, T(STR_WIFI_CONNECTED_FMT), s_wifi_notify_ip);
             break;
         default:
-            lv_obj_add_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
             break;
     }
 
+    wifi_badge_collapse_timer = lv_timer_create(wifi_badge_collapse_timer_cb, 5000, NULL);
+    lv_timer_set_repeat_count(wifi_badge_collapse_timer, 1);
+
     bsp_display_unlock();
+}
+
+// Tapping the WIFI dot/label in status_badge toggles s_wifi_expanded:
+// collapsed -> expanded (last known state, fresh 5s auto-collapse timer),
+// expanded -> collapsed immediately. No-op in AP mode - that state is always
+// expanded (see apply_wifi_badge()) and must not be dismissible.
+static void wifi_status_click_cb(lv_event_t *e) {
+    (void)e;
+    if (!wifi_badge_ready || s_wifi_notify_state == WIFI_NOTIFY_AP) return;
+    s_wifi_expanded = !s_wifi_expanded;
+    apply_wifi_badge();
 }
 
 void radar_ui_wifi_notify_ap_mode(const char *ap_ssid, const char *ap_password) {
     s_wifi_notify_state = WIFI_NOTIFY_AP;
     snprintf(s_wifi_notify_ssid, sizeof(s_wifi_notify_ssid), "%s", ap_ssid ? ap_ssid : "");
     snprintf(s_wifi_notify_pass, sizeof(s_wifi_notify_pass), "%s", ap_password ? ap_password : "");
-    apply_wifi_card();
+    s_wifi_expanded = true;
+    apply_wifi_badge();
 }
 
 void radar_ui_wifi_notify_connecting(const char *ssid) {
     s_wifi_notify_state = WIFI_NOTIFY_CONNECTING;
     snprintf(s_wifi_notify_ssid, sizeof(s_wifi_notify_ssid), "%s", ssid ? ssid : "");
-    apply_wifi_card();
+    s_wifi_expanded = true;
+    apply_wifi_badge();
 }
 
 void radar_ui_wifi_notify_connected(const char *ip_str) {
     s_wifi_notify_state = WIFI_NOTIFY_CONNECTED;
     snprintf(s_wifi_notify_ip, sizeof(s_wifi_notify_ip), "%s", ip_str ? ip_str : "");
-    apply_wifi_card();
+    s_wifi_expanded = true;
+    apply_wifi_badge();
 }
 
-static void mqtt_card_hide_timer_cb(lv_timer_t *timer) {
+// ================= MQTT STATUS (inline in status_badge) =================
+static void mqtt_badge_collapse_timer_cb(lv_timer_t *timer) {
     (void)timer;
-    lv_obj_add_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
+    s_mqtt_expanded = false;
+    lv_obj_set_style_text_color(mqtt_led_label, lv_color_hex(0x8b949e), 0);
+    lv_label_set_text(mqtt_led_label, "MQTT");
     // One-shot timer - LVGL deletes it right after this callback returns.
-    mqtt_card_hide_timer = NULL;
+    mqtt_badge_collapse_timer = NULL;
 }
 
-// Applies s_mqtt_notify_state to the card widgets. Takes bsp_display_lock()
-// itself - never call this while already holding it.
-static void apply_mqtt_card(void) {
-    if (!mqtt_card_ready) return;
+// Applies s_mqtt_notify_state/s_mqtt_expanded to mqtt_led_label - same
+// inline-expansion mechanism as apply_wifi_badge() above. Takes
+// bsp_display_lock() itself - never call this while already holding it.
+// Also invoked by mqtt_status_click_cb() to toggle s_mqtt_expanded.
+static void apply_mqtt_badge(void) {
+    if (!mqtt_badge_ready) return;
 
     bsp_display_lock(0);
 
-    if (mqtt_card_hide_timer) {
-        lv_timer_del(mqtt_card_hide_timer);
-        mqtt_card_hide_timer = NULL;
+    if (mqtt_badge_collapse_timer) {
+        lv_timer_del(mqtt_badge_collapse_timer);
+        mqtt_badge_collapse_timer = NULL;
+    }
+
+    if (!s_mqtt_expanded || s_mqtt_notify_state == MQTT_NOTIFY_NONE) {
+        lv_obj_set_style_text_color(mqtt_led_label, lv_color_hex(0x8b949e), 0);
+        lv_label_set_text(mqtt_led_label, "MQTT");
+        bsp_display_unlock();
+        return;
     }
 
     switch (s_mqtt_notify_state) {
         case MQTT_NOTIFY_CONNECTING:
-            lv_obj_set_style_border_color(mqtt_card, lv_color_hex(0x00f0ff), 0);
-            lv_obj_set_style_text_color(mqtt_card_title, lv_color_hex(0x00f0ff), 0);
-            lv_label_set_text(mqtt_card_title, LV_SYMBOL_REFRESH);
-            lv_label_set_text(mqtt_card_body, T(STR_MQTT_CONNECTING_MSG));
-            lv_obj_clear_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_color(mqtt_led_label, lv_color_hex(0x00f0ff), 0);
+            lv_label_set_text(mqtt_led_label, T(STR_MQTT_CONNECTING_MSG));
             break;
         case MQTT_NOTIFY_CONNECTED:
-            lv_obj_set_style_border_color(mqtt_card, lv_color_hex(0x00e676), 0);
-            lv_obj_set_style_text_color(mqtt_card_title, lv_color_hex(0x00e676), 0);
-            lv_label_set_text(mqtt_card_title, LV_SYMBOL_OK);
-            lv_label_set_text(mqtt_card_body, T(STR_MQTT_CONNECTED_MSG));
-            lv_obj_clear_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
-            mqtt_card_hide_timer = lv_timer_create(mqtt_card_hide_timer_cb, 3500, NULL);
-            lv_timer_set_repeat_count(mqtt_card_hide_timer, 1);
+            lv_obj_set_style_text_color(mqtt_led_label, lv_color_hex(0x00ff88), 0);
+            lv_label_set_text(mqtt_led_label, T(STR_MQTT_CONNECTED_MSG));
             break;
         case MQTT_NOTIFY_ERROR:
-            lv_obj_set_style_border_color(mqtt_card, lv_color_hex(0xef4444), 0);
-            lv_obj_set_style_text_color(mqtt_card_title, lv_color_hex(0xef4444), 0);
-            lv_label_set_text(mqtt_card_title, LV_SYMBOL_WARNING);
-            lv_label_set_text(mqtt_card_body, T(STR_MQTT_ERROR_MSG));
-            lv_obj_clear_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
-            mqtt_card_hide_timer = lv_timer_create(mqtt_card_hide_timer_cb, 5000, NULL);
-            lv_timer_set_repeat_count(mqtt_card_hide_timer, 1);
+            lv_obj_set_style_text_color(mqtt_led_label, lv_color_hex(0xef4444), 0);
+            lv_label_set_text(mqtt_led_label, T(STR_MQTT_ERROR_MSG));
             break;
         default:
-            lv_obj_add_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
             break;
     }
+
+    mqtt_badge_collapse_timer = lv_timer_create(mqtt_badge_collapse_timer_cb, 5000, NULL);
+    lv_timer_set_repeat_count(mqtt_badge_collapse_timer, 1);
 
     bsp_display_unlock();
 }
 
+// Tapping the MQTT dot/label in status_badge toggles s_mqtt_expanded - same
+// behavior as wifi_status_click_cb() above.
+static void mqtt_status_click_cb(lv_event_t *e) {
+    (void)e;
+    if (!mqtt_badge_ready) return;
+    s_mqtt_expanded = !s_mqtt_expanded;
+    apply_mqtt_badge();
+}
+
 void radar_ui_mqtt_notify_connecting(void) {
     s_mqtt_notify_state = MQTT_NOTIFY_CONNECTING;
-    apply_mqtt_card();
+    s_mqtt_expanded = true;
+    apply_mqtt_badge();
 }
 
 void radar_ui_mqtt_notify_connected(void) {
     s_mqtt_notify_state = MQTT_NOTIFY_CONNECTED;
-    apply_mqtt_card();
+    s_mqtt_expanded = true;
+    apply_mqtt_badge();
 }
 
 void radar_ui_mqtt_notify_error(void) {
     s_mqtt_notify_state = MQTT_NOTIFY_ERROR;
-    apply_mqtt_card();
+    s_mqtt_expanded = true;
+    apply_mqtt_badge();
 }
 
 static void apply_loading_card(void) {
@@ -1160,27 +1339,75 @@ void radar_ui_hide_loading(void) {
     apply_loading_card();
 }
 
-// Opacity-pulse animation shared by both status LEDs - breathing/blinking
-// speed and range vary by connection state (see set_led_indicator() below).
-static void led_pulse_anim_cb(void *var, int32_t val) {
-    lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)val, 0);
+// Phase-locked opacity pulse for the status LEDs. All LEDs are driven by a
+// single master lv_timer_t and compute their opacity from the absolute
+// LVGL tick count (lv_tick_get()) instead of a per-LED animation start
+// time. Two LEDs with the same period therefore always land on the same
+// opacity on the same frame, regardless of when each one started pulsing -
+// this is what keeps wifi_led/mqtt_led in phase once both reach
+// LED_STATE_CONNECTED. LEDs with a different period (e.g. LED_STATE_
+// CONNECTING) simply run their own cycle without disturbing the others.
+#define LED_PULSE_TICK_MS 20
+#define LED_PULSE_SLOT_COUNT 3
+
+typedef struct {
+    lv_obj_t *led;
+    bool active;
+    uint32_t period_ms;
+    lv_opa_t min_opa;
+    lv_opa_t max_opa;
+} led_pulse_slot_t;
+
+static led_pulse_slot_t s_led_pulse_slots[LED_PULSE_SLOT_COUNT];
+static lv_timer_t *s_led_pulse_timer = NULL;
+
+static led_pulse_slot_t *led_pulse_slot_for(lv_obj_t *led_obj) {
+    for (int i = 0; i < LED_PULSE_SLOT_COUNT; i++) {
+        if (s_led_pulse_slots[i].led == led_obj) {
+            return &s_led_pulse_slots[i];
+        }
+    }
+    for (int i = 0; i < LED_PULSE_SLOT_COUNT; i++) {
+        if (s_led_pulse_slots[i].led == NULL) {
+            s_led_pulse_slots[i].led = led_obj;
+            return &s_led_pulse_slots[i];
+        }
+    }
+    return NULL; // slot table full - should not happen with the known status LEDs
+}
+
+static void led_pulse_timer_cb(lv_timer_t *timer) {
+    LV_UNUSED(timer);
+    uint32_t now = lv_tick_get();
+    for (int i = 0; i < LED_PULSE_SLOT_COUNT; i++) {
+        led_pulse_slot_t *slot = &s_led_pulse_slots[i];
+        if (!slot->active) continue;
+        uint32_t phase = now % (2 * slot->period_ms);
+        int32_t range = (int32_t)slot->max_opa - (int32_t)slot->min_opa;
+        lv_opa_t opa = (phase < slot->period_ms)
+            ? (lv_opa_t)((int32_t)slot->min_opa + (range * (int32_t)phase) / (int32_t)slot->period_ms)
+            : (lv_opa_t)((int32_t)slot->max_opa - (range * (int32_t)(phase - slot->period_ms)) / (int32_t)slot->period_ms);
+        lv_obj_set_style_opa(slot->led, opa, 0);
+    }
 }
 
 static void start_led_pulse(lv_obj_t *led_obj, uint32_t period_ms, lv_opa_t min_opa, lv_opa_t max_opa) {
-    lv_anim_del(led_obj, NULL); // stop any previous animation on this LED
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, led_obj);
-    lv_anim_set_values(&a, min_opa, max_opa);
-    lv_anim_set_time(&a, period_ms);
-    lv_anim_set_playback_time(&a, period_ms);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_exec_cb(&a, led_pulse_anim_cb);
-    lv_anim_start(&a);
+    led_pulse_slot_t *slot = led_pulse_slot_for(led_obj);
+    if (!slot) return;
+    slot->active = true;
+    slot->period_ms = period_ms;
+    slot->min_opa = min_opa;
+    slot->max_opa = max_opa;
+    if (!s_led_pulse_timer) {
+        s_led_pulse_timer = lv_timer_create(led_pulse_timer_cb, LED_PULSE_TICK_MS, NULL);
+    }
 }
 
 static void stop_led_pulse(lv_obj_t *led_obj) {
-    lv_anim_del(led_obj, NULL);
+    led_pulse_slot_t *slot = led_pulse_slot_for(led_obj);
+    if (slot) {
+        slot->active = false;
+    }
     lv_obj_set_style_opa(led_obj, LV_OPA_COVER, 0);
 }
 
@@ -1430,12 +1657,16 @@ void radar_ui_build(void) {
     lv_obj_set_style_radius(wifi_led, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(wifi_led, lv_color_hex(0x64748b), 0);
     lv_obj_set_style_border_width(wifi_led, 0, 0);
-    lv_obj_clear_flag(wifi_led, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(wifi_led, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(wifi_led, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(wifi_led, wifi_status_click_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *wifi_led_label = lv_label_create(status_badge);
+    wifi_led_label = lv_label_create(status_badge);
     lv_label_set_text(wifi_led_label, "WIFI");
     lv_obj_set_style_text_font(wifi_led_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(wifi_led_label, lv_color_hex(0x8b949e), 0);
+    lv_obj_add_flag(wifi_led_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(wifi_led_label, wifi_status_click_cb, LV_EVENT_CLICKED, NULL);
 
     mqtt_led = lv_obj_create(status_badge);
     lv_obj_set_size(mqtt_led, 8, 8);
@@ -1443,13 +1674,17 @@ void radar_ui_build(void) {
     lv_obj_set_style_bg_color(mqtt_led, lv_color_hex(0x64748b), 0);
     lv_obj_set_style_border_width(mqtt_led, 0, 0);
     lv_obj_set_style_pad_left(mqtt_led, 6, 0);
-    lv_obj_clear_flag(mqtt_led, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(mqtt_led, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(mqtt_led, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(mqtt_led, mqtt_status_click_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_flag(mqtt_led, LV_OBJ_FLAG_HIDDEN);
 
     mqtt_led_label = lv_label_create(status_badge);
     lv_label_set_text(mqtt_led_label, "MQTT");
     lv_obj_set_style_text_font(mqtt_led_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(mqtt_led_label, lv_color_hex(0x8b949e), 0);
+    lv_obj_add_flag(mqtt_led_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(mqtt_led_label, mqtt_status_click_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_flag(mqtt_led_label, LV_OBJ_FLAG_HIDDEN);
 
     // Firmware update indicator - built exactly like wifi_led/mqtt_led above
@@ -1478,6 +1713,10 @@ void radar_ui_build(void) {
     fw_update_toast = lv_obj_create(radar_area);
     lv_obj_set_height(fw_update_toast, LV_SIZE_CONTENT);
     lv_obj_set_width(fw_update_toast, LV_SIZE_CONTENT);
+    // One row above status_badge - Wi-Fi/MQTT status no longer stack rows
+    // above the badge (they expand status_badge itself horizontally, see
+    // apply_wifi_badge()/apply_mqtt_badge()), so this is the only toast that
+    // still needs a row of its own.
     lv_obj_align(fw_update_toast, LV_ALIGN_BOTTOM_LEFT, 15, -50);
     lv_obj_set_style_bg_color(fw_update_toast, lv_color_hex(0x0a0f1d), 0);
     lv_obj_set_style_bg_opa(fw_update_toast, LV_OPA_90, 0);
@@ -1624,8 +1863,24 @@ void radar_ui_build(void) {
     lv_obj_set_style_bg_opa(list_cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list_cont, 0, 0);
     lv_obj_set_style_pad_all(list_cont, 0, 0);
+    lv_obj_set_scrollbar_mode(list_cont, LV_SCROLLBAR_MODE_AUTO);
+    // Reserves a gutter on the right for the scrollbar (see LIST_ITEM_WIDTH
+    // below) so it never overlaps the selection border or the vertical-rate
+    // trend symbol at the right edge of each card.
+    lv_obj_set_style_pad_right(list_cont, LIST_SCROLLBAR_GUTTER, LV_PART_MAIN);
     lv_obj_add_flag(list_cont, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(list_cont, popup_close_event_cb, LV_EVENT_CLICKED, NULL);
+
+    // Thin, subdued gray scrollbar - a bright green bar drew the eye away
+    // from the vertical-rate trend symbols next to it, so this uses a
+    // neutral, half-transparent gray instead. pad_right on LV_PART_SCROLLBAR
+    // pulls it toward the outer edge of its gutter (LIST_SCROLLBAR_GUTTER
+    // above), away from the cards, instead of hugging their right edge.
+    lv_obj_set_style_width(list_cont, 4, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(list_cont, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(list_cont, lv_color_hex(0xaaaaaa), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(list_cont, LV_OPA_40, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_right(list_cont, 2, LV_PART_SCROLLBAR);
 
     for(int i = 0; i < MAX_AIRCRAFT_CAPACITY; i++) {
         ui_slots[i].radar_vector = lv_line_create(radar_area);
@@ -1644,7 +1899,7 @@ void radar_ui_build(void) {
         lv_obj_set_hidden(ui_slots[i].radar_label, true);
 
         ui_slots[i].list_item = lv_obj_create(list_cont);
-        lv_obj_set_size(ui_slots[i].list_item, 396, 64);
+        lv_obj_set_size(ui_slots[i].list_item, LIST_ITEM_WIDTH, 64);
         lv_obj_set_pos(ui_slots[i].list_item, 0, i * 65);
         lv_obj_set_style_bg_opa(ui_slots[i].list_item, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(ui_slots[i].list_item, 0, 0);
@@ -1675,49 +1930,54 @@ void radar_ui_build(void) {
         lv_obj_align(ui_slots[i].list_lbl_trend, LV_ALIGN_TOP_RIGHT, -10, 22);
 
         lv_obj_t *div = lv_obj_create(ui_slots[i].list_item);
-        lv_obj_set_size(div, 396, 1);
+        lv_obj_set_size(div, LIST_ITEM_WIDTH, 1);
         lv_obj_align(div, LV_ALIGN_BOTTOM_MID, 0, 0);
         lv_obj_set_style_bg_color(div, lv_color_hex(0x003318), 0);
         lv_obj_set_style_border_width(div, 0, 0);
     }
 
-    popup_card_cont = lv_obj_create(radar_area);
-    lv_obj_set_size(popup_card_cont, 340, 360);
-    lv_obj_center(popup_card_cont);
-    lv_obj_set_style_bg_opa(popup_card_cont, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(popup_card_cont, 0, 0);
-    lv_obj_set_style_pad_all(popup_card_cont, 0, 0);
-    lv_obj_clear_flag(popup_card_cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(popup_card_cont, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(popup_card_cont, popup_close_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_hidden(popup_card_cont, true);
+    // Unified modal card - one bordered/rounded container in a column flex
+    // flow, hero photo on top flowing directly into the data body below it
+    // (pad_all 0 on popup_card itself - popup_hero touches the card's top
+    // edge/corners, popup_body carries its own inner padding). Replaces the
+    // old two-box layout (cyan photo frame + separate green data frame with
+    // a gap between them).
+    popup_card = lv_obj_create(radar_area);
+    lv_obj_set_size(popup_card, POPUP_CARD_WIDTH, LV_SIZE_CONTENT);
+    lv_obj_center(popup_card);
+    lv_obj_set_style_bg_color(popup_card, lv_color_hex(0x0f141c), 0);
+    lv_obj_set_style_bg_opa(popup_card, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(popup_card, lv_color_hex(0x2d4255), 0);
+    lv_obj_set_style_border_width(popup_card, 1, 0);
+    lv_obj_set_style_radius(popup_card, 12, 0);
+    lv_obj_set_style_pad_all(popup_card, 0, 0);
+    lv_obj_set_style_clip_corner(popup_card, true, 0);
+    lv_obj_set_flex_flow(popup_card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(popup_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(popup_card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(popup_card, popup_close_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_hidden(popup_card, true);
 
-    popup_top_box = lv_obj_create(popup_card_cont);
-    lv_obj_set_size(popup_top_box, 300, 165);
-    lv_obj_align(popup_top_box, LV_ALIGN_TOP_MID, 0, 10);
-    lv_obj_set_style_bg_color(popup_top_box, lv_color_hex(0x0a0e14), 0);
-    lv_obj_set_style_border_color(popup_top_box, lv_color_hex(0x38bdf8), 0);
-    lv_obj_set_style_border_width(popup_top_box, 1, 0);
-    lv_obj_set_style_radius(popup_top_box, 10, 0);
-    lv_obj_set_style_pad_all(popup_top_box, 0, 0);
-    lv_obj_clear_flag(popup_top_box, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_clip_corner(popup_top_box, true, 0);
+    // --- Hero image (top of the card, edge-to-edge, no separate frame) ---
+    popup_hero = lv_obj_create(popup_card);
+    lv_obj_set_size(popup_hero, POPUP_CARD_WIDTH, POPUP_HERO_HEIGHT);
+    lv_obj_set_style_bg_color(popup_hero, lv_color_hex(0x0a0e14), 0);
+    lv_obj_set_style_border_width(popup_hero, 0, 0);
+    lv_obj_set_style_radius(popup_hero, 0, 0);
+    lv_obj_set_style_pad_all(popup_hero, 0, 0);
+    lv_obj_clear_flag(popup_hero, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_clip_corner(popup_hero, true, 0);
 
-    popup_lbl_count = lv_label_create(popup_top_box);
-    lv_label_set_text(popup_lbl_count, "0");
-    lv_obj_set_style_text_color(popup_lbl_count, lv_color_hex(0xffffff), 0);
-    lv_obj_align(popup_lbl_count, LV_ALIGN_TOP_LEFT, 8, 4);
-
-    popup_img_preview = lv_image_create(popup_top_box);
+    popup_img_preview = lv_image_create(popup_hero);
     lv_image_set_src(popup_img_preview, &aircraft_yellow_25);
-    lv_obj_set_size(popup_img_preview, 300, 165);
+    lv_obj_set_size(popup_img_preview, POPUP_CARD_WIDTH, POPUP_HERO_HEIGHT);
     lv_image_set_inner_align(popup_img_preview, LV_IMAGE_ALIGN_CENTER);
     lv_obj_align(popup_img_preview, LV_ALIGN_CENTER, 0, 0);
 
     // Photo credit label (FR24-style) - semi-transparent badge in the
-    // bottom-left corner of the photo tile; also shows status while
+    // bottom-left corner of the photo; also shows status while
     // loading/when there is no photo.
-    popup_lbl_credit = lv_label_create(popup_top_box);
+    popup_lbl_credit = lv_label_create(popup_hero);
     lv_label_set_text(popup_lbl_credit, "RADAR STATION FEED");
     lv_obj_set_style_text_color(popup_lbl_credit, lv_color_hex(0xCCCCCC), 0);
     lv_obj_set_style_bg_color(popup_lbl_credit, lv_color_hex(0x000000), 0);
@@ -1727,36 +1987,71 @@ void radar_ui_build(void) {
     lv_obj_set_style_radius(popup_lbl_credit, 4, 0);
     lv_obj_align(popup_lbl_credit, LV_ALIGN_BOTTOM_LEFT, 8, -8);
 
-    popup_hud_box = lv_obj_create(popup_card_cont);
-    lv_obj_set_size(popup_hud_box, 320, 165);
-    lv_obj_align(popup_hud_box, LV_ALIGN_BOTTOM_MID, 0, -10);
-    lv_obj_set_style_bg_color(popup_hud_box, lv_color_hex(0x02170b), 0);
-    lv_obj_set_style_bg_opa(popup_hud_box, LV_OPA_90, 0);
-    lv_obj_set_style_border_color(popup_hud_box, lv_color_hex(0x00e575), 0);
-    lv_obj_set_style_border_width(popup_hud_box, 2, 0);
-    lv_obj_set_style_radius(popup_hud_box, 14, 0);
-    lv_obj_set_style_pad_all(popup_hud_box, 10, 0);
-    lv_obj_clear_flag(popup_hud_box, LV_OBJ_FLAG_SCROLLABLE);
+    // --- Data body (flows directly under the hero image, same card) ---
+    popup_body = lv_obj_create(popup_card);
+    lv_obj_set_size(popup_body, POPUP_CARD_WIDTH, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(popup_body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(popup_body, 0, 0);
+    lv_obj_set_style_pad_all(popup_body, 10, 0);
+    lv_obj_set_style_pad_row(popup_body, 8, 0);
+    lv_obj_set_flex_flow(popup_body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(popup_body, LV_OBJ_FLAG_SCROLLABLE);
 
-    popup_lbl_title = lv_label_create(popup_hud_box);
-    lv_label_set_text(popup_lbl_title, "TARGET DETAILS");
-    lv_obj_set_style_text_color(popup_lbl_title, lv_color_hex(0xffffff), 0);
-    lv_obj_align(popup_lbl_title, LV_ALIGN_TOP_LEFT, 5, 0);
+    // Title row: big white callsign + a muted pill with type/registration.
+    lv_obj_t *popup_row_title = lv_obj_create(popup_body);
+    lv_obj_set_size(popup_row_title, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(popup_row_title, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(popup_row_title, 0, 0);
+    lv_obj_set_style_pad_all(popup_row_title, 0, 0);
+    lv_obj_set_flex_flow(popup_row_title, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(popup_row_title, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(popup_row_title, LV_OBJ_FLAG_SCROLLABLE);
 
-    popup_lbl_col_left = lv_label_create(popup_hud_box);
-    lv_label_set_text(popup_lbl_col_left, "ALT ---\nSPD ---\nDIST ---");
-    lv_obj_set_style_text_color(popup_lbl_col_left, lv_color_hex(0xffffff), 0);
-    lv_obj_align(popup_lbl_col_left, LV_ALIGN_TOP_LEFT, 5, 28);
+    popup_lbl_callsign = lv_label_create(popup_row_title);
+    lv_label_set_text(popup_lbl_callsign, "---");
+    lv_obj_set_style_text_font(popup_lbl_callsign, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(popup_lbl_callsign, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_pad_right(popup_lbl_callsign, 8, 0);
 
-    popup_lbl_col_right = lv_label_create(popup_hud_box);
-    lv_label_set_text(popup_lbl_col_right, "V/S ---\nHDG ---\nSQK ----");
-    lv_obj_set_style_text_color(popup_lbl_col_right, lv_color_hex(0xffffff), 0);
-    lv_obj_align(popup_lbl_col_right, LV_ALIGN_TOP_RIGHT, -10, 28);
+    popup_lbl_typereg = lv_label_create(popup_row_title);
+    lv_label_set_text(popup_lbl_typereg, "---  ---");
+    lv_obj_set_style_text_font(popup_lbl_typereg, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(popup_lbl_typereg, lv_color_hex(0xc7d3dc), 0);
+    lv_obj_set_style_bg_color(popup_lbl_typereg, lv_color_hex(0x2a3542), 0);
+    lv_obj_set_style_bg_opa(popup_lbl_typereg, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_hor(popup_lbl_typereg, 8, 0);
+    lv_obj_set_style_pad_ver(popup_lbl_typereg, 3, 0);
+    lv_obj_set_style_radius(popup_lbl_typereg, 999, 0);
 
-    popup_lbl_route = lv_label_create(popup_hud_box);
+    // Data grid: 2 equal columns (flex_grow 1 each) - left ALT/SPD/DIST,
+    // right V/S/HDG/SQK. Each label has recolor enabled so its own text can
+    // mix the muted field-label color with the bright value color inline
+    // (see the "#hex text#" spans in radar_ui_refresh()) instead of needing
+    // a separate widget per field.
+    lv_obj_t *popup_grid = lv_obj_create(popup_body);
+    lv_obj_set_size(popup_grid, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(popup_grid, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(popup_grid, 0, 0);
+    lv_obj_set_style_pad_all(popup_grid, 0, 0);
+    lv_obj_set_flex_flow(popup_grid, LV_FLEX_FLOW_ROW);
+    lv_obj_clear_flag(popup_grid, LV_OBJ_FLAG_SCROLLABLE);
+
+    popup_lbl_col_left = lv_label_create(popup_grid);
+    lv_label_set_recolor(popup_lbl_col_left, true);
+    lv_label_set_text(popup_lbl_col_left, "#8094a5 ALT#\n#8094a5 SPD#\n#8094a5 DIST#");
+    lv_obj_set_flex_grow(popup_lbl_col_left, 1);
+
+    popup_lbl_col_right = lv_label_create(popup_grid);
+    lv_label_set_recolor(popup_lbl_col_right, true);
+    lv_label_set_text(popup_lbl_col_right, "#8094a5 V/S#\n#8094a5 HDG#\n#8094a5 SQK#");
+    lv_obj_set_flex_grow(popup_lbl_col_right, 1);
+
+    // Footer: station coordinates, small and dimmed.
+    popup_lbl_route = lv_label_create(popup_body);
     lv_label_set_text_fmt(popup_lbl_route, "LAT: %.2f  LON: %.2f  (%s)", g_radar_lat, g_radar_lon, g_station_name);
-    lv_obj_set_style_text_color(popup_lbl_route, lv_color_hex(0x00e575), 0);
-    lv_obj_align(popup_lbl_route, LV_ALIGN_BOTTOM_LEFT, 5, -2);
+    lv_obj_set_style_text_font(popup_lbl_route, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(popup_lbl_route, lv_color_hex(0x8094a5), 0);
+    lv_obj_set_style_pad_top(popup_lbl_route, 2, 0);
 
     // Squawk alert banner (7700/7600/7500) - child of scr (not radar_area),
     // created last so it renders on top of the whole screen.
@@ -1778,98 +2073,41 @@ void radar_ui_build(void) {
     lv_obj_set_style_text_color(banner_lbl, lv_color_hex(0xffffff), 0);
     lv_obj_center(banner_lbl);
 
-    // Wi-Fi status notification card - child of scr (not radar_area, like
-    // banner_alert above) so it overlays the whole cockpit; created last so
-    // it renders on top. Starts hidden, populated by apply_wifi_card().
-    wifi_card = lv_obj_create(scr);
-    lv_obj_set_width(wifi_card, 380);
-    lv_obj_set_height(wifi_card, LV_SIZE_CONTENT);
-    lv_obj_align(wifi_card, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(wifi_card, lv_color_hex(0x0a0f1d), 0);
-    lv_obj_set_style_bg_opa(wifi_card, LV_OPA_90, 0);
-    lv_obj_set_style_border_color(wifi_card, lv_color_hex(0x00e676), 0);
-    lv_obj_set_style_border_width(wifi_card, 2, 0);
-    lv_obj_set_style_radius(wifi_card, 12, 0);
-    lv_obj_set_style_pad_all(wifi_card, 16, 0);
-    lv_obj_set_style_shadow_width(wifi_card, 20, 0);
-    lv_obj_set_style_shadow_color(wifi_card, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_shadow_opa(wifi_card, LV_OPA_50, 0);
-    lv_obj_set_flex_flow(wifi_card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(wifi_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(wifi_card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(wifi_card, LV_OBJ_FLAG_HIDDEN);
-
-    wifi_card_title = lv_label_create(wifi_card);
-    lv_obj_set_style_text_font(wifi_card_title, &lv_font_montserrat_20, 0);
-    lv_label_set_text(wifi_card_title, "");
-
-    wifi_card_body = lv_label_create(wifi_card);
-    lv_obj_set_style_text_color(wifi_card_body, lv_color_hex(0xe6f7ee), 0);
-    lv_obj_set_style_text_align(wifi_card_body, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(wifi_card_body, "");
-
-    // MQTT status notification card - independent twin of wifi_card,
-    // offset below it so the two never overlap if both happen to be
-    // visible at once.
-    mqtt_card = lv_obj_create(scr);
-    lv_obj_set_width(mqtt_card, 380);
-    lv_obj_set_height(mqtt_card, LV_SIZE_CONTENT);
-    lv_obj_align(mqtt_card, LV_ALIGN_CENTER, 0, 110);
-    lv_obj_set_style_bg_color(mqtt_card, lv_color_hex(0x0a0f1d), 0);
-    lv_obj_set_style_bg_opa(mqtt_card, LV_OPA_90, 0);
-    lv_obj_set_style_border_color(mqtt_card, lv_color_hex(0x00e676), 0);
-    lv_obj_set_style_border_width(mqtt_card, 2, 0);
-    lv_obj_set_style_radius(mqtt_card, 12, 0);
-    lv_obj_set_style_pad_all(mqtt_card, 16, 0);
-    lv_obj_set_style_shadow_width(mqtt_card, 20, 0);
-    lv_obj_set_style_shadow_color(mqtt_card, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_shadow_opa(mqtt_card, LV_OPA_50, 0);
-    lv_obj_set_flex_flow(mqtt_card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(mqtt_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_clear_flag(mqtt_card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(mqtt_card, LV_OBJ_FLAG_HIDDEN);
-
-    mqtt_card_title = lv_label_create(mqtt_card);
-    lv_obj_set_style_text_font(mqtt_card_title, &lv_font_montserrat_20, 0);
-    lv_label_set_text(mqtt_card_title, "");
-
-    mqtt_card_body = lv_label_create(mqtt_card);
-    lv_obj_set_style_text_color(mqtt_card_body, lv_color_hex(0xe6f7ee), 0);
-    lv_obj_set_style_text_align(mqtt_card_body, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(mqtt_card_body, "");
-
-    // Map/ADS-B sequential-fetch loading bubble - single-label twin of
-    // wifi_card/mqtt_card above, same visual style. Docked near the top
-    // (just below the top_bar button row) instead of screen center, so it
-    // never overlaps the centered Wi-Fi/MQTT connection cards.
-    loading_card = lv_obj_create(scr);
-    lv_obj_set_width(loading_card, 380);
-    lv_obj_set_height(loading_card, LV_SIZE_CONTENT);
-    lv_obj_align(loading_card, LV_ALIGN_TOP_MID, 0, 42);
-    lv_obj_set_style_bg_color(loading_card, lv_color_hex(0x0a0f1d), 0);
-    lv_obj_set_style_bg_opa(loading_card, LV_OPA_90, 0);
+    // Map/ADS-B sequential-fetch loading pill - compact badge styled like
+    // status_badge (WIFI/MQTT, bottom-left), docked at the top center of
+    // radar_area (not the full screen) so it stays centered over the radar
+    // itself and never drifts into right_panel's top_bar buttons.
+    loading_card = lv_obj_create(radar_area);
+    lv_obj_set_height(loading_card, 22);
+    lv_obj_set_width(loading_card, LV_SIZE_CONTENT);
+    lv_obj_align(loading_card, LV_ALIGN_TOP_MID, 0, 4);
+    lv_obj_set_style_bg_color(loading_card, lv_color_hex(0x0b1410), 0);
+    lv_obj_set_style_bg_opa(loading_card, LV_OPA_80, 0);
     lv_obj_set_style_border_color(loading_card, lv_color_hex(0x00e676), 0);
-    lv_obj_set_style_border_width(loading_card, 2, 0);
-    lv_obj_set_style_radius(loading_card, 12, 0);
-    lv_obj_set_style_pad_all(loading_card, 16, 0);
-    lv_obj_set_style_shadow_width(loading_card, 20, 0);
-    lv_obj_set_style_shadow_color(loading_card, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_shadow_opa(loading_card, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(loading_card, 1, 0);
+    lv_obj_set_style_radius(loading_card, 8, 0);
+    lv_obj_set_style_pad_hor(loading_card, 10, 0);
+    lv_obj_set_style_pad_ver(loading_card, 2, 0);
     lv_obj_clear_flag(loading_card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(loading_card, LV_OBJ_FLAG_HIDDEN);
 
     loading_card_label = lv_label_create(loading_card);
-    lv_obj_set_style_text_font(loading_card_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_width(loading_card_label, LV_SIZE_CONTENT);
+    // Clips instead of wrapping - the pill itself auto-sizes to the text
+    // (LV_SIZE_CONTENT above), so this only guards against the LV_SYMBOL_
+    // DOWNLOAD glyph/counter ever being cut mid-render if that changes.
+    lv_label_set_long_mode(loading_card_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_font(loading_card_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(loading_card_label, lv_color_hex(0x00ff88), 0);
     lv_obj_set_style_text_align(loading_card_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(loading_card_label, "");
 
     bsp_display_unlock();
 
-    wifi_card_ready = true;
-    apply_wifi_card();
-    mqtt_card_ready = true;
-    apply_mqtt_card();
+    wifi_badge_ready = true;
+    apply_wifi_badge();
+    mqtt_badge_ready = true;
+    apply_mqtt_badge();
     loading_card_ready = true;
     apply_loading_card();
     status_badge_ready = true;

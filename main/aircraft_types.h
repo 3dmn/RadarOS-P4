@@ -13,11 +13,10 @@ bool is_helicopter(const char *type);
 // by wifi_mgr_get_max_aircraft() (NVS/web panel, 10-200).
 #define MAX_AIRCRAFT_CAPACITY    200
 #define MAX_SEEN_DB              512
-// Upper bound on flight trail length - the actually displayed point count is
-// further capped at runtime by wifi_mgr_get_trail_len() (NVS/web panel, max
-// 120). MAX_TRACK_HISTORY_PTS is the per-aircraft history buffer capacity in
-// track_db (PSRAM), MAX_TRACK_POINTS is the per-UI-slot trail line render
-// buffer - both must be >= the largest allowed trail_len value.
+// MAX_TRACK_HISTORY_PTS is the per-aircraft history buffer capacity in
+// track_db (PSRAM). MAX_TRACK_POINTS is the per-UI-slot render buffer for the
+// selected aircraft's flight trace line (AIRCRAFT_CLICK_FLIGHT_TRACE) -
+// fetched trace points beyond this are evenly downsampled before rendering.
 #define MAX_TRACK_POINTS         120
 #define MAX_TRACK_HISTORY_PTS    120
 #define MAX_HUD_SEGS             32
@@ -49,6 +48,14 @@ typedef enum {
     AIR_FILTER_CIVIL = 1,  // Civil / airliner only (is_military == false)
     AIR_FILTER_MIL = 2     // Military only (is_military == true)
 } air_filter_mode_t;
+
+// Action performed when an aircraft is tapped/clicked (radar icon or
+// sidebar list row) - replaces the old fixed "always show popup" behavior.
+typedef enum {
+    AIRCRAFT_CLICK_DISABLED = 0,      // No reaction on click
+    AIRCRAFT_CLICK_DETAILS_PHOTO = 1, // Details + photo popup card
+    AIRCRAFT_CLICK_FLIGHT_TRACE = 2   // Fetch and draw the flight trace from the API, no popup
+} aircraft_click_action_t;
 
 typedef struct {
     char hex[8];

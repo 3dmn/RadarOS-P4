@@ -53,8 +53,8 @@ CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 # CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP and CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
 # were tried here and removed - they conflicted with the ESP-Hosted SDIO
 # driver's own buffer allocation (heap corruption) and with the LVGL/
-# Waveshare DSI display driver's startup allocation. g_https_mutex (see
-# wifi_manager.h) already serializes every HTTPS/TLS session in the app,
+# Waveshare DSI display driver's startup allocation. The global net_http_lock
+# (see net_lock.h) already serializes every HTTPS/TLS session in the app,
 # which is what actually protects the SDIO driver's DMA buffers.
 
 # Konfiguracja wyswietlacza LVGL
@@ -73,3 +73,85 @@ CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_26=y
 CONFIG_LV_TXT_BREAK_CHARS=" ,.;:-_"
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+
+# ===================== SDIO/PSRAM stabilization plan =====================
+# Root cause: esp_hosted's SDIO streaming-mode RX path hard-asserts on
+# internal-SRAM mempool exhaustion (managed_components/espressif__esp_hosted
+# host/drivers/transport/sdio/sdio_drv.c, v1.4.7) instead of degrading
+# gracefully like its own non-streaming path already does.
+
+# Pin lwIP's own tcpip_thread to core 0 (System & Network), alongside this
+# app's own network worker tasks (see xTaskCreatePinnedToCore calls in
+# adsb_service.c/map_tile_service.c/mqtt_service.c/ota_update_service.c/
+# photo_service.c) - core 1 is reserved for LVGL/UI (see main.c). esp_hosted's
+# own SDIO/RPC threads have no Kconfig-exposed affinity and are hardcoded in
+# the vendored component (managed_components/espressif__esp_hosted) with no
+# portable way to pin them from application code on this FreeRTOS/IDF
+# version (vTaskCoreAffinitySet is not available in IDF 5.3.5) - they are
+# left floating.
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+
+# esp_hosted SDIO RX: switch from "streaming" (the component's default) to
+# "no optimization" (plain per-packet reads). Streaming mode's
+# sdio_rx_get_buffer()/sdio_push_data_to_queue() (sdio_drv.c, v1.4.7)
+# hard-assert() on mempool exhaustion instead of returning NULL; the
+# no-optimization path's allocator returns NULL on exhaustion and is
+# already handled gracefully by the RX pump loop ("RX mempool exhausted,
+# dropping frame"). Trades some SDIO throughput (more, smaller
+# transactions) for eliminating two confirmed hard-crash paths - validate
+# map tile grid download time and ADS-B poll latency after this change.
+CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_NONE=y
+
+# esp_hosted SDIO queue depth: raised from the component's default of 20.
+# Not a fixed-size buffer pool at rest (see CONFIG_ESP_HOSTED_USE_MEMPOOL -
+# it is a reuse cache of freed blocks, not a pre-allocated arena), but the
+# queue depth is still the worst-case ceiling on how many RX buffers can be
+# simultaneously checked out and not yet freed - at the current 8192-byte
+# RX buffer size (see the LOCAL PATCH note below), 48 slots is a
+# WORST-CASE ~384 KB of internal SRAM (hosted_malloc() hardcodes
+# MALLOC_CAP_INTERNAL) if ever fully exercised at once. This must be
+# validated with heap_caps_get_free_size(MALLOC_CAP_INTERNAL) under load
+# (map tile grid download + ADS-B poll + flight trace fetch running
+# together) - dial RX_Q_SIZE back down before considering TX_Q_SIZE (a much
+# cheaper 2048 B/buffer, see ESP_HOSTED_STA_AP_TX_BUF_SIZE) any higher.
+CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=48
+CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=48
+
+# esp_hosted SDIO RX buffer ceiling: raised 1536 -> 4096 -> 8192 bytes as a
+# LOCAL PATCH to managed_components/espressif__esp_hosted (see
+# common/transport/esp_hosted_transport.h and
+# host/drivers/transport/sdio/sdio_reg.h - no Kconfig option exists for
+# this, it is a plain #define in the vendored source). The ESP32-C6 slave
+# aggregates Wi-Fi A-MPDU frames beyond even the previous 4096-byte cap
+# (4374 bytes observed in the field), which "Len from slave[...] exceeds
+# max [...]" rejected outright, permanently wedging the SDIO RX pipe (RPC
+# timeouts, DNS/HTTP failures) until reboot. The *transmit* side (STA/AP)
+# now uses its own, separate, much smaller 2048-byte buffer
+# (ESP_HOSTED_STA_AP_TX_BUF_SIZE, transport_drv.c) instead of sharing this
+# RX-sized constant, since P4-originated frames never approach 8192 bytes
+# and sharing one constant for both directions wasted internal SRAM on
+# oversized TX buffers. managed_components/ is git-ignored - all of these
+# patches must be reapplied after `idf.py fullclean` or a fresh dependency
+# pull (see README.md's "Required local patches" section).
+
+# Caps the TCP segment/window sizes lwIP negotiates, which in turn limits
+# how much data a single incoming TCP segment can carry - directly reduces
+# how large a chunk the ESP32-C6 needs to aggregate into one SDIO frame to
+# relay a TLS record toward the host, complementing the buffer-size patch
+# above (belt and suspenders, not a full fix on its own: the ~2000-byte
+# frames observed in the field already exceeded the pre-existing 1536-byte
+# default before this project ever changed these values).
+CONFIG_LWIP_TCP_MSS=1440
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5760
+CONFIG_LWIP_TCP_WND_DEFAULT=5760
+
+# Raised from the IDF default of 10 - "httpd_accept_conn: error in accept
+# (23)" (ENFILE) and "esp-tls: Failed to create socket" in PHOTO_SVC/
+# OTA_UPDATE were observed when the web config server (httpd, up to
+# max_open_sockets sockets - see start_web_server() in wifi_manager.c),
+# MQTT, the ADS-B poller, map tile fetches and photo/OTA HTTPS requests
+# all held a socket at the same time and exhausted lwIP's global socket
+# table. 16 gives enough headroom for all of these concurrently without
+# a lwIP-side ENFILE, on top of the httpd-side max_open_sockets/
+# lru_purge_enable mitigation.
+CONFIG_LWIP_MAX_SOCKETS=16

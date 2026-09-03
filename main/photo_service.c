@@ -28,6 +28,7 @@
 #include "wifi_manager.h"
 #include "radar_ui.h"
 #include "photo_service.h"
+#include "net_lock.h"
 
 static const char *TAG = "PHOTO_SVC";
 
@@ -52,13 +53,20 @@ static bool http_get_to_buffer_ua(const char *url, uint8_t *buf, int buf_size, i
     if (!client) return false;
     esp_http_client_set_header(client, "User-Agent", user_agent);
 
-    // g_https_mutex serializes this against adsb_service.c/map_tile_service.c/
-    // ota_update_service.c's TLS fetches - see the comment on g_https_mutex
-    // in wifi_manager.h. Never more than one HTTPS/TLS session open anywhere
-    // in the app at once, so the Wi-Fi SDIO driver's internal DMA-capable
-    // buffers are never starved by concurrent connections.
+    // net_http_lock() serializes this against every other esp_http_client
+    // session in the app (adsb_service.c/map_tile_service.c/
+    // ota_update_service.c) - see net_lock.h. Never more than one HTTPS/TLS
+    // session open anywhere in the app at once, so the Wi-Fi SDIO driver's
+    // internal DMA-capable buffers are never starved by concurrent
+    // connections. Cleanup happens before the lock is released, so the next
+    // waiter never opens its own session before this one's TLS resources are
+    // fully torn down.
     bool ok = false;
-    xSemaphoreTake(g_https_mutex, portMAX_DELAY);
+    if (!net_http_lock(portMAX_DELAY)) {
+        ESP_LOGE(TAG, "Failed to acquire the global HTTP/HTTPS network lock");
+        esp_http_client_cleanup(client);
+        return false;
+    }
     esp_err_t err = esp_http_client_open(client, 0);
     if (err == ESP_OK) {
         esp_http_client_fetch_headers(client);
@@ -76,8 +84,8 @@ static bool http_get_to_buffer_ua(const char *url, uint8_t *buf, int buf_size, i
     } else {
         ESP_LOGW(TAG, "HTTP open failed: %s (%s)", esp_err_to_name(err), url);
     }
-    xSemaphoreGive(g_https_mutex);
     esp_http_client_cleanup(client);
+    net_http_unlock();
     return ok;
 }
 
@@ -194,12 +202,12 @@ static const icao_wiki_map_t ICAO_WIKI_MAP[] = {
     {"P208", "Tecnam_P2008"},
     {"P210", "Tecnam_P2010"},
     {"P06T", "Tecnam_P2006T"},
-    {"AS50", "Eurocopter_AS350_\xC3\x89cureuil"},
+    {"AS50", "Eurocopter_AS350_\xC3\x89" "cureuil"},
     {"EC35", "Eurocopter_EC135"},
     {"EC45", "Eurocopter_EC145"},
     {"H145", "Airbus_Helicopters_H145"},
     {"H135", "Airbus_Helicopters_H135"},
-    {"H125", "Eurocopter_AS350_\xC3\x89cureuil"},
+    {"H125", "Eurocopter_AS350_\xC3\x89" "cureuil"},
     {"R44",  "Robinson_R44"},
     {"R22",  "Robinson_R22"},
     {"R66",  "Robinson_R66"},
@@ -286,6 +294,66 @@ static bool fetch_wikipedia_type_photo(const char *type_code, char *photo_url_ou
     return have_url;
 }
 
+// Reads the EXIF Orientation tag (0x0112) from a JPEG's APP1 segment, if
+// present. stb_image has no EXIF support and always decodes pixels in the
+// file's raw stored order, so a source photo captured/tagged as rotated
+// still comes back from stbi_load_from_memory() as stored - this is scanned
+// separately, straight from the compressed buffer, before decoding.
+// Returns 1 (normal) whenever the tag is absent or anything about the
+// segment fails to parse cleanly - callers must treat that as "no
+// correction needed", never as an error to surface.
+static int read_exif_orientation(const uint8_t *buf, size_t len) {
+    if (len < 4 || buf[0] != 0xFF || buf[1] != 0xD8) return 1;
+
+    size_t pos = 2;
+    while (pos + 4 <= len) {
+        if (buf[pos] != 0xFF) { pos++; continue; }
+        uint8_t marker = buf[pos + 1];
+        if (marker == 0xFF) { pos++; continue; } // padding fill byte
+        if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD8)) { pos += 2; continue; } // no length field
+        if (marker == 0xDA || marker == 0xD9) break; // SOS/EOI - past the header, give up
+
+        size_t seg_len = ((size_t)buf[pos + 2] << 8) | buf[pos + 3];
+        if (seg_len < 2 || pos + 2 + seg_len > len) break;
+
+        if (marker == 0xE1 && seg_len >= 8 && memcmp(buf + pos + 4, "Exif\0\0", 6) == 0) {
+            const uint8_t *tiff = buf + pos + 4 + 6;
+            size_t tiff_len = seg_len - 2 - 6;
+            if (tiff_len < 8) return 1;
+
+            bool le;
+            if (tiff[0] == 'I' && tiff[1] == 'I') le = true;
+            else if (tiff[0] == 'M' && tiff[1] == 'M') le = false;
+            else return 1;
+
+            uint32_t ifd0_off = le
+                ? ((uint32_t)tiff[4] | ((uint32_t)tiff[5] << 8) | ((uint32_t)tiff[6] << 16) | ((uint32_t)tiff[7] << 24))
+                : (((uint32_t)tiff[4] << 24) | ((uint32_t)tiff[5] << 16) | ((uint32_t)tiff[6] << 8) | (uint32_t)tiff[7]);
+            if ((uint64_t)ifd0_off + 2 > tiff_len) return 1;
+
+            uint16_t entry_count = le
+                ? (uint16_t)(tiff[ifd0_off] | (tiff[ifd0_off + 1] << 8))
+                : (uint16_t)((tiff[ifd0_off] << 8) | tiff[ifd0_off + 1]);
+
+            size_t entries_start = (size_t)ifd0_off + 2;
+            for (uint16_t i = 0; i < entry_count; i++) {
+                size_t entry_off = entries_start + (size_t)i * 12;
+                if (entry_off + 12 > tiff_len) break;
+                const uint8_t *e = tiff + entry_off;
+                uint16_t tag = le ? (uint16_t)(e[0] | (e[1] << 8)) : (uint16_t)((e[0] << 8) | e[1]);
+                if (tag == 0x0112) {
+                    uint16_t value = le ? (uint16_t)(e[8] | (e[9] << 8)) : (uint16_t)((e[8] << 8) | e[9]);
+                    return (value >= 1 && value <= 8) ? (int)value : 1;
+                }
+            }
+            return 1;
+        }
+
+        pos += 2 + seg_len;
+    }
+    return 1;
+}
+
 // Decodes JPEG (including progressive - handled natively by stb_image) into
 // an RGB565 buffer in PSRAM, sized to the image's actual dimensions. The
 // intermediate RGB888 buffer from stbi_load_from_memory is freed right
@@ -300,6 +368,12 @@ static lv_image_dsc_t *decode_jpeg(const uint8_t *jpeg_buf, size_t jpeg_len) {
         return NULL;
     }
 
+    // Orientation 3 (180 deg) means the source file itself is stored rotated -
+    // mirror both axes on top of the display's default (unrotated) mapping
+    // below. See CLAUDE.md HARDWARE LOCKED note. Any other/unknown/absent
+    // orientation keeps the locked default as-is.
+    bool rotate_180 = (read_exif_orientation(jpeg_buf, jpeg_len) == 3);
+
     uint8_t *pixel_buf = heap_caps_malloc((size_t)w * h * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!pixel_buf) {
         stbi_image_free(rgb_data);
@@ -308,13 +382,14 @@ static lv_image_dsc_t *decode_jpeg(const uint8_t *jpeg_buf, size_t jpeg_len) {
 
     uint16_t *dst = (uint16_t *)pixel_buf;
     for (int y = 0; y < h; y++) {
-        int src_y = (h - 1) - y; // read rows bottom-to-top (flip Y)
+        int src_y = rotate_180 ? (h - 1) - y : y; // HARDWARE VERIFIED: direct top-to-bottom by default. NEVER change to (h-1)-y! See CLAUDE.md.
         const unsigned char *src_row = rgb_data + (size_t)src_y * w * 3;
         uint16_t *dst_row = dst + (size_t)y * w;
         for (int x = 0; x < w; x++) {
-            uint8_t r = src_row[x * 3 + 0];
-            uint8_t g = src_row[x * 3 + 1];
-            uint8_t b = src_row[x * 3 + 2];
+            int src_x = rotate_180 ? (w - 1) - x : x;
+            uint8_t r = src_row[src_x * 3 + 0];
+            uint8_t g = src_row[src_x * 3 + 1];
+            uint8_t b = src_row[src_x * 3 + 2];
             dst_row[x] = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
         }
     }
@@ -425,7 +500,9 @@ static void photo_worker_task(void *arg) {
 
 void photo_service_start(void) {
     s_req_queue = xQueueCreate(1, sizeof(photo_request_t));
-    xTaskCreatePinnedToCore(photo_worker_task, "photo_worker", 8192, NULL, 2, NULL, 1);
+    // Pinned to core 0 (System & Network) - core 1 is reserved for LVGL/UI
+    // (see main.c).
+    xTaskCreatePinnedToCore(photo_worker_task, "photo_worker", 8192, NULL, 2, NULL, 0);
 }
 
 void photo_service_request(const char *hex, const char *registration, const char *type_code) {

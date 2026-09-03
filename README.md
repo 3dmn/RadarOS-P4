@@ -33,15 +33,16 @@ RadarOS-P4 turns an **ESP32-P4** with a **7" MIPI-DSI touchscreen (1024×600)** 
 </p>
 ## Key Features
 
-- **Live ADS-B Tracking** — real-time feed from [adsb.fi](https://adsb.fi) and [airplanes.live](https://airplanes.live), with a **dynamic query radius**: the request distance (in nautical miles) is derived from the HUD's currently selected range (e.g. 50 km → 27 NM, 100 km → 54 NM, 250 km → 135 NM) instead of a fixed worst-case radius, keeping API responses small and fast even over dense metro airspace.
+- **Live ADS-B Tracking** — real-time feed from [adsb.fi](https://adsb.fi) and [airplanes.live](https://airplanes.live), with a **dynamic query radius**: the request distance (in nautical miles) is derived from the HUD's currently selected range (e.g. 50 km → 27 NM, 100 km → 54 NM, 400 km → 216 NM) instead of a fixed worst-case radius, keeping API responses small and fast even over dense metro airspace.
 - **Interactive 7" Touch HUD (LVGL 9.5)** — 60 FPS vector rendering with concentric range rings, bearing compass, heading-oriented aircraft/helicopter icons, a persistent bottom-left status capsule (Wi-Fi, MQTT, and a pulsing amber **● FW** firmware-update indicator), and a darkened OpenStreetMap tile background rendered into a PSRAM canvas.
-- **Home Assistant & MQTT Discovery** — full auto-discovery on connect: **23 entities** (controls, sensors, and a dedicated `update` entity with changelog) appear under one device card with zero YAML. See [below](#home-assistant--mqtt-integration).
+- **Home Assistant & MQTT Discovery** — full auto-discovery on connect: **25 entities** (controls, sensors, and a dedicated `update` entity with changelog) appear under one device card with zero YAML. See [below](#home-assistant--mqtt-integration).
 - **Web Management Panel** — five-tab responsive dark/neon cockpit UI, JSON configuration export/import, a tab selection that survives a page refresh (URL hash + `localStorage`), and a built-in GitHub release checker with a one-tap download link.
 - **Dual-Language UI (i18n)** — every on-screen and web-panel string is available in **English** and **Polski**, switchable live from the touchscreen, the web panel, or Home Assistant.
 - **Optimized Memory Architecture** — the 32 MB external PSRAM hosts the ADS-B response buffer, the map tile canvas, and (via `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`/`CONFIG_MBEDTLS_DYNAMIC_BUFFER`) the mbedTLS session buffers, leaving the internal DMA-capable SRAM free for the ESP-Hosted Wi-Fi/SDIO driver. A global mutex further guarantees only one HTTPS/TLS session is ever open at a time across ADS-B polling, map tiles, and version checks, eliminating the `sdio_rx_get_buffer` memory crashes that concurrent TLS sessions used to cause.
 - **Global Categorized Airport Database** — hundreds of airports worldwide split into **Commercial Hubs**, **Military Air Bases**, and **General Aviation & Aeroclubs**, each independently toggleable and rendered only within the active radar range.
 - **Emergency Squawk Alerts** — instant, pulsing full-width HUD banner on transponder codes **7700** (Emergency), **7600** (Radio Failure), and **7500** (Hijack).
 - **Rich Target Telemetry** — sanitized callsigns, automatic `[MIL]` tagging for NATO/allied military traffic, altitude trend arrows (▲/▼), ground speed, heading, and colored flight trails with configurable history length.
+- **Military Priority** — optional (default **on**, toggleable from the web panel or Home Assistant): military/NATO contacts are always sorted to the top of the sidebar list, and when the tracked-aircraft limit is reached, the farthest civilian target is evicted first — a military contact is only ever dropped once military traffic alone exceeds the limit.
 - **Interactive Aircraft Popups & 3-Tier Photo Engine** — tap any target for full flight parameters plus a real airframe photo (Planespotters / Airport-Data) or a Wikipedia type-fallback image.
 
 ## Hardware Requirements
@@ -73,6 +74,23 @@ idf.py -p COMx flash monitor
 
 RadarOS-P4 ships with a **dual 8 MB OTA partition layout** (`partitions.csv`). The very first flash must be done over USB so the bootloader and both OTA slots are written correctly; every subsequent update can be done wirelessly — see [Firmware Updates](#firmware-updates).
 
+### Required local patches: `espressif/esp_hosted`
+
+`managed_components/` is git-ignored (standard for IDF Component Manager dependencies), so none of the patches below are preserved by git - they must be reapplied by hand after `idf.py fullclean`, deleting `managed_components/`, or a fresh clone/`idf.py build` that re-resolves dependencies. Every edit carries a `LOCAL PATCH` comment in place explaining itself.
+
+**1. SDIO RX buffer size (1536 → 4096 → 8192 bytes).** The ESP32-C6 Wi-Fi co-processor aggregates Wi-Fi A-MPDU frames well past a single Ethernet MTU - 4374 bytes observed in the field, exceeding even a previous 4096-byte interim fix - which the component's RX buffer ceiling in packet mode (`CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_NONE`, set in `sdkconfig.defaults`) rejected outright, permanently wedging the SDIO/RPC link (`sdio_get_len_from_slave: Len from slave[...] exceeds max [...]`, followed by RPC timeouts and total loss of Wi-Fi/DNS/HTTP):
+
+| File | Symbol | Value |
+|---|---|---|
+| `managed_components/espressif__esp_hosted/common/transport/esp_hosted_transport.h` | `ESP_TRANSPORT_SDIO_MAX_BUF_SIZE` | `1536` → `8192` |
+| `managed_components/espressif__esp_hosted/host/drivers/transport/sdio/sdio_reg.h` | `ESP_RX_BUFFER_SIZE` | `1536` → `8192` |
+
+The same file also has a small resync fix in `sdio_get_len_from_slave()` (`sdio_drv.c`) so a frame that still exceeds the (now larger) buffer is dropped without wedging the pipe, instead of looping on the same stuck length forever. Note: `ESP_TX_BUFFER_MASK`/`ESP_TX_BUFFER_MAX` in `sdio_reg.h` are unrelated to this - they decode the slave's TX-credit token register (a protocol-fixed 12-bit field), not a buffer size to tune.
+
+**2. Separate, smaller TX buffer (2048 bytes) for STA/AP.** `ESP_TRANSPORT_SDIO_MAX_BUF_SIZE` above used to also size every *TX* mempool block (`transport_drv.c`'s `chan_arr[...]->memp`, shared by both RX and TX) - once it grew to 8192 bytes for the RX fix above, the same internal-SRAM budget held noticeably fewer simultaneously in-flight TX buffers, which is what made `transport_drv_sta_tx`/`transport_drv_ap_tx` start hitting `assert(copy_buff)` (`transport_drv.c:239`) under combined ADS-B + HTTP traffic. P4-originated frames (HTTP requests, TCP ACKs, ADS-B GETs) are bounded by `CONFIG_LWIP_TCP_MSS=1440` and never approach 8192 bytes, so STA/AP now allocate from their own dedicated `ESP_HOSTED_STA_AP_TX_BUF_SIZE = 2048` (`transport_drv.c`) instead of sharing the RX-sized constant - decoupling the two directions instead of trading one exhaustion for the other. The Serial (BT/RPC control-plane) channel is untouched, still sized off `MAX_TRANSPORT_BUFFER_SIZE`.
+
+**3. TX mempool exhaustion no longer reboots the device.** `transport_drv.c`'s `mempool_alloc()` has no fixed block-count ceiling to raise (see `host/drivers/mempool/mempool.c`: it's a reuse cache backed directly by `heap_caps_aligned_alloc(..., MALLOC_CAP_INTERNAL)`, not a pre-sized arena) - a `NULL` return means internal SRAM is genuinely exhausted at that instant, however unlikely patch 2 above makes that now. Both `transport_drv_sta_tx`/`transport_drv_ap_tx` treat that as a normal, transient netif TX failure (rate-limited `ESP_LOGW`, `ESP_ERR_ESP_NETIF_TX_FAILED`) instead of hard-asserting, so lwIP/TCP just retransmits the dropped packet instead of the device rebooting. `CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=48` and this app's own `net_http_lock` (`main/net_lock.c`, serializes its own HTTP client sessions) remain the two real levers for how much concurrent traffic this pool has to absorb - see the code comments for why raising `CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL` to give it more headroom is not recommended without hardware validation. With the RX buffer now at 8192 bytes, `CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=48` is a worst-case ~384 KB of internal SRAM if ever fully exercised - validate with `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)` under combined load before raising it further.
+
 ### First-time setup
 
 On first boot (or whenever no Wi-Fi network is saved), the device starts its own setup access point:
@@ -99,7 +117,7 @@ RadarOS-P4 uses a lightweight **notification-only** update mechanism — the dev
 
 | Tab | Contents |
 |---|---|
-| **Radar & Display** | Brightness, default range, max aircraft, traffic filter (ALL/CIVIL/MIL), ground traffic, background map, emergency squawk banner, airport layer + per-category toggles (Commercial/Military/Aeroclubs), flight trail length. |
+| **Radar & Display** | Brightness, default range, max aircraft, traffic filter (ALL/CIVIL/MIL), military priority (list sort + eviction protection), ground traffic, background map, emergency squawk banner, airport layer + per-category toggles (Commercial/Military/Aeroclubs), flight trail length, aircraft click action (Disabled/Details & Photo/Flight Trace). |
 | **Location** | Station latitude/longitude with an interactive square (1:1) map picker. |
 | **Wi-Fi & Network** | SSID/password, network scanner, live connection status and IP address. |
 | **System** | Language (English/Polski), station name, firmware version, JSON configuration backup/restore, manual **Firmware Update (OTA)** file upload, and the **Firmware Update Check** section (version check URL, Check for Updates Now, GitHub download link). |
@@ -109,7 +127,7 @@ All binary settings use animated iOS-style toggle switches, and every setting pe
 
 ## Home Assistant / MQTT Integration
 
-Enable MQTT on the **MQTT** tab, point it at your broker, and RadarOS-P4 publishes retained [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) config topics on connect — the station and all **23 entities** appear automatically under one device card, no YAML required.
+Enable MQTT on the **MQTT** tab, point it at your broker, and RadarOS-P4 publishes retained [Home Assistant MQTT Discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery) config topics on connect — the station and all **25 entities** appear automatically under one device card, no YAML required.
 
 **Availability & reconnection:** a Last Will and Testament (`homeassistant/sensor/<node_id>/status/state`, `online`/`offline`) keeps every entity's availability accurate even on an unclean disconnect (Wi-Fi drop, power loss); the client reconnects to the broker automatically.
 
@@ -118,16 +136,20 @@ Enable MQTT on the **MQTT** tab, point it at your broker, and RadarOS-P4 publish
 | Entity | Type | Options |
 |---|---|---|
 | Screen Brightness | `number` | 10–100 % |
-| Radar Range | `select` | 10 / 20 / 30 / 50 / 100 / 150 / 200 / 250 km |
+| Radar Range | `select` | 25 / 50 / 100 / 200 / 400 km |
 | Traffic Filter | `select` | All / Civil Only / Military & Rescue |
 | Ground Traffic | `switch` | Show / Hide |
 | Background Map | `switch` | On / Off |
 | Emergency Squawk Banner | `switch` | On / Off |
+| Military Priority | `switch` | On / Off |
 | Airports Layer | `switch` | On / Off |
 | Commercial / Military / Aeroclub Airports | `switch` ×3 | On / Off per category |
 | Flight Trail Length | `select` | Short / Medium / Long / Maximum |
+| Aircraft Click Action | `select` | Disabled / Details & Photo / Flight Trace |
 | Interface Language | `select` | English / Polski |
 | Restart Device | `button` | Reboots the ESP32-P4 |
+
+Every `switch`/`select`/`number` control follows the same topic pattern: `homeassistant/<component>/<node_id>/<object_id>/set` (command, published by you/HA) and `.../state` (state, retained, published by the device). For **Military Priority**: `homeassistant/switch/radaros_p4/mil_priority/set` (payload `ON`/`OFF`) and `homeassistant/switch/radaros_p4/mil_priority/state` (`<node_id>` defaults to `radaros_p4`, configurable on the **MQTT** tab).
 
 **Firmware update entity:**
 
@@ -148,6 +170,7 @@ Enable MQTT on the **MQTT** tab, point it at your broker, and RadarOS-P4 publish
 | Wi-Fi Signal | RSSI in dBm |
 | Uptime | Seconds since boot |
 | Free Heap | Free heap memory in kB |
+| Last Reset Reason | Diagnostic sensor - why the device last rebooted (Power On, Software Reset, Crash/Panic, Watchdog, Brownout, Deep Sleep, etc.) |
 
 Renaming the station in the **System** tab updates the Home Assistant device name on the next reboot; the MQTT topic prefix / node ID is configured independently on the **MQTT** tab.
 

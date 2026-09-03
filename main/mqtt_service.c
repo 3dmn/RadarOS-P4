@@ -80,6 +80,7 @@ typedef struct {
     const char **options;          // select entities only
     int num_options;
     bool json_attributes;          // sensor entities with an extra attributes topic
+    const char *entity_category;   // may be NULL ("diagnostic","config")
 } discovery_spec_t;
 
 static void add_device_json(cJSON *root) {
@@ -122,6 +123,7 @@ static void publish_discovery_entity(const discovery_spec_t *spec) {
     if (spec->unit) cJSON_AddStringToObject(root, "unit_of_measurement", spec->unit);
     if (spec->state_class) cJSON_AddStringToObject(root, "state_class", spec->state_class);
     if (spec->json_attributes) cJSON_AddStringToObject(root, "json_attributes_topic", attr_topic);
+    if (spec->entity_category) cJSON_AddStringToObject(root, "entity_category", spec->entity_category);
 
     if (strcmp(spec->component, "number") == 0) {
         cJSON_AddNumberToObject(root, "min", spec->num_min);
@@ -204,11 +206,30 @@ static void unpublish_removed_entities(void) {
     topic_build(state_topic, sizeof(state_topic), "switch", "auto_update", "state");
     esp_mqtt_client_publish(s_client, cfg_topic, "", 0, 1, 1);
     esp_mqtt_client_publish(s_client, state_topic, "", 0, 1, 1);
+
+    // select.trail_length - replaced by select.click_action (Aircraft Click Action).
+    topic_build(cfg_topic, sizeof(cfg_topic), "select", "trail_length", "config");
+    topic_build(state_topic, sizeof(state_topic), "select", "trail_length", "state");
+    esp_mqtt_client_publish(s_client, cfg_topic, "", 0, 1, 1);
+    esp_mqtt_client_publish(s_client, state_topic, "", 0, 1, 1);
+}
+
+static const char *reset_reason_to_str(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON:   return "Power On";
+        case ESP_RST_SW:        return "Software Reset";
+        case ESP_RST_PANIC:     return "Crash / Panic Abort";
+        case ESP_RST_INT_WDT:   return "Interrupt Watchdog";
+        case ESP_RST_TASK_WDT:  return "Task Watchdog";
+        case ESP_RST_BROWNOUT:  return "Brownout (Voltage Drop)";
+        case ESP_RST_DEEPSLEEP: return "Deep Sleep Wakeup";
+        default:                return "Other / Unknown";
+    }
 }
 
 static const char *RANGE_OPTIONS[] = {"25 km", "50 km", "100 km", "200 km", "400 km"};
 static const char *AIR_FILTER_OPTIONS[] = {"All", "Civil Only", "Military & Rescue"};
-static const char *TRAIL_LEN_OPTIONS[] = {"Short", "Medium", "Long", "Maximum"};
+static const char *CLICK_ACTION_OPTIONS[] = {"Disabled", "Details & Photo", "Flight Trace"};
 static const char *LANGUAGE_OPTIONS[] = {"English", "Polski"};
 
 static void publish_all_discovery(void) {
@@ -248,6 +269,11 @@ static void publish_all_discovery(void) {
     publish_discovery_entity(&s);
 
     memset(&s, 0, sizeof(s));
+    s.component = "switch"; s.object_id = "mil_priority"; s.name = "Military Priority";
+    s.icon = "mdi:shield-star"; s.has_command = true; s.has_state = true;
+    publish_discovery_entity(&s);
+
+    memset(&s, 0, sizeof(s));
     s.component = "switch"; s.object_id = "apts"; s.name = "Airports Layer";
     s.icon = "mdi:airport"; s.has_command = true; s.has_state = true;
     publish_discovery_entity(&s);
@@ -268,9 +294,9 @@ static void publish_all_discovery(void) {
     publish_discovery_entity(&s);
 
     memset(&s, 0, sizeof(s));
-    s.component = "select"; s.object_id = "trail_length"; s.name = "Flight Trail Length";
-    s.icon = "mdi:chart-line-variant"; s.has_command = true; s.has_state = true;
-    s.options = TRAIL_LEN_OPTIONS; s.num_options = sizeof(TRAIL_LEN_OPTIONS) / sizeof(TRAIL_LEN_OPTIONS[0]);
+    s.component = "select"; s.object_id = "click_action"; s.name = "Aircraft Click Action";
+    s.icon = "mdi:gesture-tap"; s.has_command = true; s.has_state = true;
+    s.options = CLICK_ACTION_OPTIONS; s.num_options = sizeof(CLICK_ACTION_OPTIONS) / sizeof(CLICK_ACTION_OPTIONS[0]);
     publish_discovery_entity(&s);
 
     memset(&s, 0, sizeof(s));
@@ -333,6 +359,11 @@ static void publish_all_discovery(void) {
     s.device_class = "update"; s.icon = "mdi:cloud-download-outline"; s.has_state = true;
     publish_discovery_entity(&s);
 
+    memset(&s, 0, sizeof(s));
+    s.component = "sensor"; s.object_id = "last_reset_reason"; s.name = "Last Reset Reason";
+    s.icon = "mdi:restart-alert"; s.entity_category = "diagnostic"; s.has_state = true;
+    publish_discovery_entity(&s);
+
     publish_update_discovery();
     unpublish_removed_entities();
 
@@ -354,18 +385,18 @@ static air_filter_mode_t air_filter_from_label(const char *label) {
     return AIR_FILTER_ALL;
 }
 
-static const char *trail_len_to_label(uint8_t len) {
-    if (len <= 15) return "Short";
-    if (len <= 30) return "Medium";
-    if (len <= 60) return "Long";
-    return "Maximum";
+static const char *click_action_to_label(uint8_t action) {
+    switch (action) {
+        case AIRCRAFT_CLICK_DISABLED:      return "Disabled";
+        case AIRCRAFT_CLICK_FLIGHT_TRACE:  return "Flight Trace";
+        default:                           return "Details & Photo";
+    }
 }
 
-static uint8_t trail_len_from_label(const char *label) {
-    if (strcmp(label, "Short") == 0) return 15;
-    if (strcmp(label, "Long") == 0) return 60;
-    if (strcmp(label, "Maximum") == 0) return 120;
-    return 30;
+static uint8_t click_action_from_label(const char *label) {
+    if (strcmp(label, "Disabled") == 0) return AIRCRAFT_CLICK_DISABLED;
+    if (strcmp(label, "Flight Trace") == 0) return AIRCRAFT_CLICK_FLIGHT_TRACE;
+    return AIRCRAFT_CLICK_DETAILS_PHOTO;
 }
 
 // ================= STATE PUBLISHING =================
@@ -438,6 +469,16 @@ static void publish_state_str(const char *component, const char *object_id, cons
     esp_mqtt_client_publish(s_client, topic, value, 0, 1, 1);
 }
 
+// Published once per boot right after the broker connection is established -
+// the reset reason cannot change until the next reboot, so re-publishing it
+// on every reconnect would be redundant retained traffic.
+static void publish_reset_reason_state(void) {
+    static bool s_published = false;
+    if (s_published) return;
+    s_published = true;
+    publish_state_str("sensor", "last_reset_reason", reset_reason_to_str(esp_reset_reason()));
+}
+
 static void publish_attr_json(const char *component, const char *object_id, cJSON *root) {
     char topic[MQTT_TOPIC_MAX_LEN];
     topic_build(topic, sizeof(topic), component, object_id, "attributes");
@@ -459,6 +500,7 @@ void mqtt_service_publish_state(void) {
     publish_state_str("switch", "gnd", radar_ui_get_show_ground() ? "ON" : "OFF");
     publish_state_str("switch", "map", radar_ui_get_map_enabled() ? "ON" : "OFF");
     publish_state_str("switch", "squawk_alert", wifi_mgr_get_squawk_alert_enabled() ? "ON" : "OFF");
+    publish_state_str("switch", "mil_priority", wifi_mgr_get_mil_priority_enabled() ? "ON" : "OFF");
     publish_state_str("switch", "apts", radar_ui_get_airports_enabled() ? "ON" : "OFF");
 
     uint8_t apt_mask = wifi_mgr_get_apt_filter_mask();
@@ -466,7 +508,7 @@ void mqtt_service_publish_state(void) {
     publish_state_str("switch", "apt_military", (apt_mask & APT_TYPE_MIL) ? "ON" : "OFF");
     publish_state_str("switch", "apt_aeroclubs", (apt_mask & APT_TYPE_GA) ? "ON" : "OFF");
 
-    publish_state_str("select", "trail_length", trail_len_to_label(wifi_mgr_get_trail_len()));
+    publish_state_str("select", "click_action", click_action_to_label(wifi_mgr_get_click_action()));
     publish_state_str("select", "language", wifi_mgr_get_lang() == LANG_PL ? "Polski" : "English");
 
     telemetry_t t;
@@ -592,6 +634,8 @@ static void handle_command(const char *topic, const char *payload) {
         radar_ui_set_map_enabled(strcmp(payload, "ON") == 0);
     } else if (topic_is(topic, "switch", "squawk_alert")) {
         wifi_mgr_set_squawk_alert_enabled(strcmp(payload, "ON") == 0);
+    } else if (topic_is(topic, "switch", "mil_priority")) {
+        wifi_mgr_set_mil_priority_enabled(strcmp(payload, "ON") == 0);
     } else if (topic_is(topic, "switch", "apts")) {
         radar_ui_set_airports_enabled(strcmp(payload, "ON") == 0);
     } else if (topic_is(topic, "switch", "apt_commercial")) {
@@ -600,8 +644,8 @@ static void handle_command(const char *topic, const char *payload) {
         set_apt_type_bit(APT_TYPE_MIL, strcmp(payload, "ON") == 0);
     } else if (topic_is(topic, "switch", "apt_aeroclubs")) {
         set_apt_type_bit(APT_TYPE_GA, strcmp(payload, "ON") == 0);
-    } else if (topic_is(topic, "select", "trail_length")) {
-        wifi_mgr_set_trail_len(trail_len_from_label(payload));
+    } else if (topic_is(topic, "select", "click_action")) {
+        wifi_mgr_set_click_action(click_action_from_label(payload));
     } else if (topic_is(topic, "select", "language")) {
         // Matches the existing web panel behavior: a language change is
         // applied to every static LCD/web string only after a reboot.
@@ -637,9 +681,9 @@ static void handle_command(const char *topic, const char *payload) {
 static void subscribe_all_commands(void) {
     static const struct { const char *component; const char *object_id; } controls[] = {
         {"number", "brightness"}, {"select", "range"}, {"select", "air_filter"},
-        {"switch", "gnd"}, {"switch", "map"}, {"switch", "squawk_alert"}, {"switch", "apts"},
+        {"switch", "gnd"}, {"switch", "map"}, {"switch", "squawk_alert"}, {"switch", "mil_priority"}, {"switch", "apts"},
         {"switch", "apt_commercial"}, {"switch", "apt_military"}, {"switch", "apt_aeroclubs"},
-        {"select", "trail_length"}, {"select", "language"}, {"button", "restart"},
+        {"select", "click_action"}, {"select", "language"}, {"button", "restart"},
         {"update", "firmware"},
     };
     for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
@@ -673,6 +717,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 publish_all_discovery();
             }
             mqtt_service_publish_state();
+            publish_reset_reason_state();
             break;
 
         case MQTT_EVENT_DISCONNECTED:
@@ -778,7 +823,9 @@ static void mqtt_worker_task(void *arg) {
 }
 
 void mqtt_service_start(void) {
-    xTaskCreatePinnedToCore(mqtt_worker_task, "mqtt_worker", 6144, NULL, 3, NULL, 1);
+    // Pinned to core 0 (System & Network) - core 1 is reserved for LVGL/UI
+    // (see main.c).
+    xTaskCreatePinnedToCore(mqtt_worker_task, "mqtt_worker", 6144, NULL, 3, NULL, 0);
 }
 
 mqtt_conn_status_t mqtt_service_get_status(void) {
