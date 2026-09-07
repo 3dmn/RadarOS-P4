@@ -1,0 +1,13 @@
+{
+  "name": "RadarOS-P4",
+  "version": "1.0.0",
+  "home_page": "https://github.com/3dmn/RadarOS-P4",
+  "builds": [
+    {
+      "chipFamily": "ESP32-P4",
+      "parts": [
+        { "path": "RadarOS-P4-v1.0.0-merged.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
