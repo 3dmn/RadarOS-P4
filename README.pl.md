@@ -13,6 +13,10 @@ RadarOS-P4 zamienia moduł **ESP32-P4** z **7-calowym ekranem dotykowym MIPI-DSI
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-MQTT%20Discovery-41BDF5.svg)](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)
 [![Version](https://img.shields.io/badge/firmware-v1.0.0-brightgreen.svg)](main/version.h)
 
+### 🚀 Webowy Instalator (1-Click Flash)
+Wgraj oprogramowanie bezpośrednio z przeglądarki przez Web Serial (Chrome, Edge, Brave) bez instalacji narzędzi:
+👉 **[Uruchom RadarOS-P4 Web Installer](https://3dmn.github.io/RadarOS-P4/)**
+
 ---
 
 ## Spis treści

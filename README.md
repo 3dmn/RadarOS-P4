@@ -13,6 +13,10 @@ RadarOS-P4 turns an **ESP32-P4** with a **7" MIPI-DSI touchscreen (1024×600)** 
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-MQTT%20Discovery-41BDF5.svg)](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)
 [![Version](https://img.shields.io/badge/firmware-v1.0.0-brightgreen.svg)](main/version.h)
 
+### 🚀 Web Installer (1-Click Flash)
+Flash directly from your browser via Web Serial (Chrome, Edge, Brave) without any local setup:
+👉 **[Launch RadarOS-P4 Web Installer](https://3dmn.github.io/RadarOS-P4/)**
+
 ---
 
 ## Table of Contents
