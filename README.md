@@ -1,5 +1,3 @@
-📖 [Wersja polska (README.pl.md)](README.pl.md)
-
 # RadarOS-P4 📡✈️
 
 **Open-Source Live ADS-B Flight Radar & Air Traffic Display.**
