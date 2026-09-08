@@ -1,26 +1,26 @@
-# Kompilacja i pliki tymczasowe ESP-IDF
+
 build/
 sdkconfig
 sdkconfig.old
 managed_components/
 dependencies.lock
 
-# Konfiguracja lokalna VS Code / JetBrains / Clangd
+
 .vscode/
 .idea/
 .clangd/
 *.log
 
-# Asystenci AI
-CLAUDE.md
-.claude/
+# Local tools
+*.local
 
-# Artefakty kompilacji
+
+
 *.bin
 *.map
 *.elf
 
-# Pliki systemowe
+
 Thumbs.db
 .DS_Store
 # Ignore root debug images
